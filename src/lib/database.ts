@@ -12,7 +12,7 @@ export async function getDb(): Promise<Database> {
 
 export async function select<T>(query: string, params?: unknown[]): Promise<T[]> {
   const db = await getDb();
-  return db.select<T>(query, params);
+  return db.select(query, params) as Promise<T[]>;
 }
 
 export async function execute(query: string, params?: unknown[]): Promise<void> {

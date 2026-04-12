@@ -1,0 +1,67 @@
+import { useEffect, useState } from "react";
+import { useProjectStore } from "@/stores/projectStore";
+import type { Project } from "@/lib/types";
+import { ProjectCard } from "./ProjectCard";
+import { EditProjectDialog } from "./EditProjectDialog";
+
+export function ProjectList() {
+  const { projects, fetchProjects, deleteProject } = useProjectStore();
+  const [filter, setFilter] = useState<string>("all");
+  const [editingProject, setEditingProject] = useState<Project | null>(null);
+
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
+
+  const filtered = filter === "all"
+    ? projects
+    : projects.filter((p) => p.status === filter);
+
+  return (
+    <div className="space-y-3">
+      {/* Filter */}
+      <div className="flex items-center gap-2">
+        {["all", "active", "archived"].map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+              filter === f
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-accent"
+            }`}
+          >
+            {f === "all" ? "全部" : f === "active" ? "活跃" : "归档"}
+          </button>
+        ))}
+        <span className="text-xs text-muted-foreground ml-auto">
+          {filtered.length} 个项目
+        </span>
+      </div>
+
+      {/* Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filtered.map((project) => (
+          <ProjectCard
+            key={project.id}
+            project={project}
+            onEdit={setEditingProject}
+            onDelete={deleteProject}
+          />
+        ))}
+      </div>
+
+      {filtered.length === 0 && (
+        <div className="text-center py-12 text-muted-foreground text-sm">
+          {filter === "all" ? "暂无项目" : `没有${filter === "active" ? "活跃" : "归档"}项目`}
+        </div>
+      )}
+
+      <EditProjectDialog
+        open={!!editingProject}
+        onOpenChange={(open) => { if (!open) setEditingProject(null); }}
+        project={editingProject}
+      />
+    </div>
+  );
+}

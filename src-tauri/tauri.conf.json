@@ -30,9 +30,7 @@
   },
   "plugins": {
     "sql": {
-      "preload": {
-        "db": "sqlite:codex-ai.db"
-      }
+      "preload": ["sqlite:codex-ai.db"]
     }
   },
   "bundle": {

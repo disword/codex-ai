@@ -1,0 +1,53 @@
+import { useEffect, useState } from "react";
+import { useEmployeeStore } from "@/stores/employeeStore";
+import { EmployeeCard } from "./EmployeeCard";
+
+export function EmployeeList() {
+  const { employees, fetchEmployees } = useEmployeeStore();
+  const [filter, setFilter] = useState<string>("all");
+
+  useEffect(() => {
+    fetchEmployees();
+  }, [fetchEmployees]);
+
+  const filtered = filter === "all"
+    ? employees
+    : employees.filter((e) => e.status === filter);
+
+  return (
+    <div className="space-y-3">
+      {/* Filter */}
+      <div className="flex items-center gap-2">
+        {["all", "online", "busy", "offline", "error"].map((f) => (
+          <button
+            key={f}
+            onClick={() => setFilter(f)}
+            className={`px-2.5 py-1 text-xs rounded-md transition-colors ${
+              filter === f
+                ? "bg-primary text-primary-foreground"
+                : "text-muted-foreground hover:bg-accent"
+            }`}
+          >
+            {f === "all" ? "全部" : f === "online" ? "在线" : f === "busy" ? "忙碌" : f === "offline" ? "离线" : "错误"}
+          </button>
+        ))}
+        <span className="text-xs text-muted-foreground ml-auto">
+          {filtered.length} 名员工
+        </span>
+      </div>
+
+      {/* Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        {filtered.map((emp) => (
+          <EmployeeCard key={emp.id} employee={emp} />
+        ))}
+      </div>
+
+      {filtered.length === 0 && (
+        <div className="text-center py-12 text-muted-foreground text-sm">
+          {filter === "all" ? "暂无员工" : `没有${filter === "online" ? "在线" : filter === "busy" ? "忙碌" : filter === "offline" ? "离线" : "错误"}员工`}
+        </div>
+      )}
+    </div>
+  );
+}
