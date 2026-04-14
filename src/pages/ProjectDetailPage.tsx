@@ -106,6 +106,18 @@ export function ProjectDetailPage() {
         </Card>
       )}
 
+      <Card className="p-4">
+        <h3 className="text-sm font-semibold mb-3">项目信息</h3>
+        <div className="space-y-1">
+          <p className="text-xs font-medium text-muted-foreground">仓库路径</p>
+          {project.repo_path ? (
+            <p className="text-sm font-mono break-all">{project.repo_path}</p>
+          ) : (
+            <p className="text-sm text-muted-foreground">未配置仓库路径</p>
+          )}
+        </div>
+      </Card>
+
       {/* Task Stats */}
       <div className="grid grid-cols-5 gap-3">
         {Object.entries(tasksByStatus).map(([status, items]) => (

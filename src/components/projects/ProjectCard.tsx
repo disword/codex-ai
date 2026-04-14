@@ -22,6 +22,19 @@ export function ProjectCard({ project, taskCount, onEdit, onDelete }: ProjectCar
             {project.description && (
               <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{project.description}</p>
             )}
+            <div className="mt-2 rounded-md bg-secondary/40 px-2.5 py-2">
+              <p className="text-[11px] font-medium text-muted-foreground">仓库路径</p>
+              {project.repo_path ? (
+                <p
+                  className="mt-1 text-[11px] font-mono text-foreground break-all line-clamp-2"
+                  title={project.repo_path}
+                >
+                  {project.repo_path}
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-muted-foreground">未配置仓库路径</p>
+              )}
+            </div>
           </div>
         </div>
         <div className="flex items-center gap-1 shrink-0">
