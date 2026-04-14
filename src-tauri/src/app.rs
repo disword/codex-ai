@@ -8,7 +8,7 @@ use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_sql::{DbInstances, DbPool};
 use uuid::Uuid;
 
-use crate::codex::{new_codex_command, CodexManager};
+use crate::codex::{inspect_sdk_runtime, load_codex_settings, new_codex_command, CodexManager};
 use crate::db::models::{
     CodexHealthCheck, CodexRuntimeStatus, CodexSessionRecord, Comment, CreateComment,
     CreateEmployee, CreateProject, CreateSubtask, CreateTask, Employee, EmployeeMetric, Project,
@@ -456,6 +456,7 @@ async fn record_completion_metric(pool: &SqlitePool, task: &Task) -> Result<(), 
 #[tauri::command]
 pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<CodexHealthCheck, String> {
     let database_loaded = sqlite_pool(&app).await.is_ok();
+    let codex_settings = load_codex_settings(&app)?;
     let last_session_error = if database_loaded {
         let pool = sqlite_pool(&app).await?;
         sqlx::query_scalar::<_, Option<String>>(
@@ -485,14 +486,26 @@ pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<CodexHealthCh
                 let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 (false, (!stderr.is_empty()).then_some(stderr))
             }
-            Err(error) => (false, Some(format!("Failed to run codex --version: {}", error))),
+            Err(error) => (
+                false,
+                Some(format!("Failed to run codex --version: {}", error)),
+            ),
         },
         Err(error) => (false, Some(error)),
     };
+    let sdk_health = inspect_sdk_runtime(&app, &codex_settings).await;
 
     Ok(CodexHealthCheck {
         codex_available,
         codex_version,
+        node_available: sdk_health.node_available,
+        node_version: sdk_health.node_version,
+        sdk_enabled: codex_settings.sdk_enabled,
+        sdk_installed: sdk_health.sdk_installed,
+        sdk_version: sdk_health.sdk_version,
+        sdk_install_dir: codex_settings.sdk_install_dir.clone(),
+        one_shot_effective_provider: sdk_health.effective_provider,
+        sdk_status_message: sdk_health.status_message,
         database_loaded,
         database_path: database_path(&app).map(|path| path.to_string_lossy().to_string()),
         shell_available: true,

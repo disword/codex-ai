@@ -9,6 +9,7 @@ use tokio::process::Command;
 
 const CODEX_PATH_ENV_VARS: &[&str] = &["CODEX_CLI_PATH", "CODEX_PATH"];
 const NODE_PATH_ENV_VARS: &[&str] = &["CODEX_NODE_PATH"];
+const NPM_PATH_ENV_VARS: &[&str] = &["CODEX_NPM_PATH"];
 
 #[cfg(not(target_os = "windows"))]
 const COMMON_UNIX_DIRS: &[&str] = &["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin"];
@@ -25,16 +26,61 @@ const HOME_RELATIVE_DIRS: &[&str] = &[
 ];
 
 pub async fn new_codex_command() -> Result<Command, String> {
-    let codex_path = resolve_executable("codex", CODEX_PATH_ENV_VARS).await?;
-    let launch_mode = determine_launch_mode(&codex_path).await?;
+    build_command("codex", CODEX_PATH_ENV_VARS, None, &[], None).await
+}
+
+pub async fn new_node_command(node_path_override: Option<&str>) -> Result<Command, String> {
+    let explicit_path = normalize_override_path(node_path_override)?;
+    build_command(
+        "node",
+        NODE_PATH_ENV_VARS,
+        explicit_path.as_deref(),
+        &[],
+        explicit_path.as_deref(),
+    )
+    .await
+}
+
+pub async fn new_npm_command(node_path_override: Option<&str>) -> Result<Command, String> {
+    let explicit_node_path = normalize_override_path(node_path_override)?;
+    let extra_search_dirs = explicit_node_path
+        .as_ref()
+        .and_then(|path| path.parent().map(Path::to_path_buf))
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    build_command(
+        "npm",
+        NPM_PATH_ENV_VARS,
+        None,
+        &extra_search_dirs,
+        explicit_node_path.as_deref(),
+    )
+    .await
+}
+
+async fn build_command(
+    binary_name: &str,
+    env_vars: &[&str],
+    explicit_path: Option<&Path>,
+    additional_search_dirs: &[PathBuf],
+    node_override: Option<&Path>,
+) -> Result<Command, String> {
+    let executable_path =
+        resolve_executable(binary_name, env_vars, explicit_path, additional_search_dirs).await?;
+    let launch_mode =
+        determine_launch_mode(&executable_path, node_override, additional_search_dirs).await?;
 
     Ok(match launch_mode {
-        CodexLaunchMode::Direct { executable, path_dirs } => {
+        LaunchMode::Direct {
+            executable,
+            path_dirs,
+        } => {
             let mut command = Command::new(&executable);
             apply_augmented_path(&mut command, path_dirs);
             command
         }
-        CodexLaunchMode::ViaNode {
+        LaunchMode::ViaNode {
             node_executable,
             script_path,
             path_dirs,
@@ -47,7 +93,7 @@ pub async fn new_codex_command() -> Result<Command, String> {
     })
 }
 
-enum CodexLaunchMode {
+enum LaunchMode {
     Direct {
         executable: PathBuf,
         path_dirs: Vec<PathBuf>,
@@ -59,31 +105,50 @@ enum CodexLaunchMode {
     },
 }
 
-async fn determine_launch_mode(codex_path: &Path) -> Result<CodexLaunchMode, String> {
-    let codex_dir = codex_path.parent().map(Path::to_path_buf);
+async fn determine_launch_mode(
+    executable_path: &Path,
+    node_override: Option<&Path>,
+    additional_search_dirs: &[PathBuf],
+) -> Result<LaunchMode, String> {
+    let executable_dir = executable_path.parent().map(Path::to_path_buf);
 
-    if script_requires_env_node(codex_path) {
-        let node_executable = resolve_executable("node", NODE_PATH_ENV_VARS).await?;
+    if script_requires_env_node(executable_path) {
+        let node_executable = resolve_executable(
+            "node",
+            NODE_PATH_ENV_VARS,
+            node_override,
+            additional_search_dirs,
+        )
+        .await?;
         let node_dir = node_executable.parent().map(Path::to_path_buf);
-        return Ok(CodexLaunchMode::ViaNode {
+        return Ok(LaunchMode::ViaNode {
             node_executable,
-            script_path: codex_path.to_path_buf(),
-            path_dirs: unique_dirs([node_dir, codex_dir]),
+            script_path: executable_path.to_path_buf(),
+            path_dirs: unique_dirs([node_dir, executable_dir]),
         });
     }
 
-    Ok(CodexLaunchMode::Direct {
-        executable: codex_path.to_path_buf(),
-        path_dirs: unique_dirs([codex_dir]),
+    Ok(LaunchMode::Direct {
+        executable: executable_path.to_path_buf(),
+        path_dirs: unique_dirs([executable_dir]),
     })
 }
 
-async fn resolve_executable(binary_name: &str, env_vars: &[&str]) -> Result<PathBuf, String> {
+async fn resolve_executable(
+    binary_name: &str,
+    env_vars: &[&str],
+    explicit_path: Option<&Path>,
+    additional_search_dirs: &[PathBuf],
+) -> Result<PathBuf, String> {
+    if let Some(path) = resolve_explicit_path(binary_name, explicit_path)? {
+        return Ok(path);
+    }
+
     if let Some(path) = resolve_from_env_override(env_vars) {
         return Ok(path);
     }
 
-    if let Some(path) = resolve_from_known_paths(binary_name) {
+    if let Some(path) = resolve_from_known_paths(binary_name, additional_search_dirs) {
         return Ok(path);
     }
 
@@ -96,6 +161,31 @@ async fn resolve_executable(binary_name: &str, env_vars: &[&str]) -> Result<Path
     ))
 }
 
+fn resolve_explicit_path(
+    binary_name: &str,
+    explicit_path: Option<&Path>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(path) = explicit_path else {
+        return Ok(None);
+    };
+
+    if is_executable_file(path) {
+        return Ok(Some(path.to_path_buf()));
+    }
+
+    Err(format!(
+        "配置的 {binary_name} 路径无效：{}",
+        path.to_string_lossy()
+    ))
+}
+
+fn normalize_override_path(path: Option<&str>) -> Result<Option<PathBuf>, String> {
+    match path.map(str::trim).filter(|value| !value.is_empty()) {
+        Some(value) => resolve_explicit_path("node", Some(Path::new(value))),
+        None => Ok(None),
+    }
+}
+
 fn resolve_from_env_override(env_vars: &[&str]) -> Option<PathBuf> {
     env_vars.iter().find_map(|key| {
         env::var_os(key)
@@ -104,17 +194,26 @@ fn resolve_from_env_override(env_vars: &[&str]) -> Option<PathBuf> {
     })
 }
 
-fn resolve_from_known_paths(binary_name: &str) -> Option<PathBuf> {
-    search_dirs().into_iter().find_map(|dir| {
-        candidate_binary_names(binary_name)
-            .into_iter()
-            .map(|name| dir.join(name))
-            .find(|path| is_executable_file(path))
-    })
+fn resolve_from_known_paths(
+    binary_name: &str,
+    additional_search_dirs: &[PathBuf],
+) -> Option<PathBuf> {
+    search_dirs(additional_search_dirs)
+        .into_iter()
+        .find_map(|dir| {
+            candidate_binary_names(binary_name)
+                .into_iter()
+                .map(|name| dir.join(name))
+                .find(|path| is_executable_file(path))
+        })
 }
 
-fn search_dirs() -> Vec<PathBuf> {
+fn search_dirs(additional_search_dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut dirs = Vec::new();
+
+    for dir in additional_search_dirs {
+        push_unique_dir(&mut dirs, dir.clone());
+    }
 
     if let Some(path_var) = env::var_os("PATH") {
         for dir in env::split_paths(&path_var) {
@@ -190,11 +289,26 @@ fn candidate_binary_names(binary_name: &str) -> Vec<String> {
 
 async fn resolve_from_shell(binary_name: &str) -> Option<PathBuf> {
     let lookups = [
-        ("/bin/zsh", vec!["-lc".to_string(), format!("whence -p {binary_name}")]),
-        ("/bin/zsh", vec!["-ilc".to_string(), format!("whence -p {binary_name}")]),
-        ("/bin/bash", vec!["-lc".to_string(), format!("type -P {binary_name}")]),
-        ("/bin/bash", vec!["-ilc".to_string(), format!("type -P {binary_name}")]),
-        ("/bin/sh", vec!["-lc".to_string(), format!("command -v {binary_name}")]),
+        (
+            "/bin/zsh",
+            vec!["-lc".to_string(), format!("whence -p {binary_name}")],
+        ),
+        (
+            "/bin/zsh",
+            vec!["-ilc".to_string(), format!("whence -p {binary_name}")],
+        ),
+        (
+            "/bin/bash",
+            vec!["-lc".to_string(), format!("type -P {binary_name}")],
+        ),
+        (
+            "/bin/bash",
+            vec!["-ilc".to_string(), format!("type -P {binary_name}")],
+        ),
+        (
+            "/bin/sh",
+            vec!["-lc".to_string(), format!("command -v {binary_name}")],
+        ),
     ];
 
     for (program, args) in lookups {
@@ -308,9 +422,12 @@ fn is_executable_file(path: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_executable_path_from_output, script_requires_env_node, unique_dirs};
+    use super::{
+        parse_executable_path_from_output, resolve_executable, script_requires_env_node,
+        unique_dirs,
+    };
     use std::fs;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn create_temp_dir() -> PathBuf {
@@ -382,6 +499,46 @@ mod tests {
         ]);
 
         assert_eq!(dirs, vec![first, second]);
+
+        fs::remove_dir_all(base).expect("remove temp dir");
+    }
+
+    #[test]
+    fn explicit_override_path_takes_precedence() {
+        let base = create_temp_dir();
+        let node = base.join("node");
+        make_executable(&node, "#!/bin/sh\n");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        let resolved = runtime
+            .block_on(resolve_executable("node", &[], Some(Path::new(&node)), &[]))
+            .expect("resolve node override");
+
+        assert_eq!(resolved, node);
+
+        fs::remove_dir_all(base).expect("remove temp dir");
+    }
+
+    #[test]
+    fn additional_search_dirs_help_resolve_neighbor_binaries() {
+        let base = create_temp_dir();
+        let bin_dir = base.join("bin");
+        fs::create_dir_all(&bin_dir).expect("create bin dir");
+        let npm = bin_dir.join("npm");
+        make_executable(&npm, "#!/bin/sh\n");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+        let resolved = runtime
+            .block_on(resolve_executable("npm", &[], None, &[bin_dir.clone()]))
+            .expect("resolve npm from extra search dir");
+
+        assert_eq!(resolved, npm);
 
         fs::remove_dir_all(base).expect("remove temp dir");
     }

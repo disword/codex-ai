@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   CodexHealthCheck,
+  CodexSdkInstallResult,
+  CodexSettings,
   CodexRuntimeStatus,
   Comment,
   Employee,
@@ -8,6 +10,11 @@ import type {
   Subtask,
   Task,
 } from "./types";
+
+export interface UpdateCodexSettingsInput {
+  sdk_enabled?: boolean;
+  node_path_override?: string | null;
+}
 
 export interface CreateProjectInput {
   name: string;
@@ -68,6 +75,20 @@ export async function healthCheck(): Promise<CodexHealthCheck> {
 
 export async function getCodexSessionStatus(employeeId: string): Promise<CodexRuntimeStatus> {
   return invoke("get_codex_session_status", { employeeId });
+}
+
+export async function getCodexSettings(): Promise<CodexSettings> {
+  return invoke("get_codex_settings");
+}
+
+export async function updateCodexSettings(
+  updates: UpdateCodexSettingsInput,
+): Promise<CodexSettings> {
+  return invoke("update_codex_settings", { updates });
+}
+
+export async function installCodexSdk(): Promise<CodexSdkInstallResult> {
+  return invoke("install_codex_sdk");
 }
 
 export async function createProject(input: CreateProjectInput): Promise<Project> {

@@ -102,6 +102,14 @@ export interface CodexSessionRecord {
 export interface CodexHealthCheck {
   codex_available: boolean;
   codex_version: string | null;
+  node_available: boolean;
+  node_version: string | null;
+  sdk_enabled: boolean;
+  sdk_installed: boolean;
+  sdk_version: string | null;
+  sdk_install_dir: string;
+  one_shot_effective_provider: string;
+  sdk_status_message: string;
   database_loaded: boolean;
   database_path: string | null;
   shell_available: boolean;
@@ -112,6 +120,21 @@ export interface CodexHealthCheck {
 export interface CodexRuntimeStatus {
   running: boolean;
   session: CodexSessionRecord | null;
+}
+
+export interface CodexSettings {
+  sdk_enabled: boolean;
+  node_path_override: string | null;
+  sdk_install_dir: string;
+  one_shot_preferred_provider: string;
+}
+
+export interface CodexSdkInstallResult {
+  sdk_installed: boolean;
+  sdk_version: string | null;
+  install_dir: string;
+  node_version: string | null;
+  message: string;
 }
 
 export type CodexModelId = "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2";

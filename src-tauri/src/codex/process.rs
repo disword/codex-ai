@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
 use tokio::time::sleep;
 
@@ -15,7 +15,10 @@ use crate::app::{
     fetch_codex_session_by_id, insert_codex_session_event, insert_codex_session_record, now_sqlite,
     sqlite_pool, update_codex_session_record, validate_runtime_working_dir,
 };
-use crate::codex::{new_codex_command, CodexManager};
+use crate::codex::{
+    inspect_sdk_runtime, load_codex_settings, new_codex_command, new_node_command,
+    sdk_bridge_script_path, CodexManager,
+};
 use crate::db::models::{CodexExit, CodexOutput, CodexSession};
 
 const SUPPORTED_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"];
@@ -25,6 +28,13 @@ const SESSION_ID_PREFIX: &str = "session id:";
 #[derive(Debug, Deserialize)]
 struct AiSubtasksPayload {
     subtasks: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SdkBridgeResponse {
+    ok: bool,
+    text: Option<String>,
+    error: Option<String>,
 }
 
 fn normalize_model(model: Option<&str>) -> &'static str {
@@ -777,7 +787,7 @@ fn build_one_shot_exec_args(prompt: &str) -> Vec<String> {
     ]
 }
 
-async fn run_ai_command(prompt: String) -> Result<String, String> {
+async fn run_ai_command_via_exec(prompt: String) -> Result<String, String> {
     let mut cmd = new_codex_command()
         .await
         .map_err(|error| format!("Failed to spawn codex exec: {}", error))?;
@@ -797,6 +807,102 @@ async fn run_ai_command(prompt: String) -> Result<String, String> {
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
         Err(format!("codex exec failed: {}", stderr.trim()))
+    }
+}
+
+fn parse_sdk_bridge_output(stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    let raw_stdout = String::from_utf8_lossy(stdout).trim().to_string();
+    let raw_stderr = String::from_utf8_lossy(stderr).trim().to_string();
+
+    if !raw_stdout.is_empty() {
+        match serde_json::from_str::<SdkBridgeResponse>(&raw_stdout) {
+            Ok(response) if response.ok => {
+                return Ok(response.text.unwrap_or_default().trim().to_string())
+            }
+            Ok(response) => {
+                return Err(response
+                    .error
+                    .filter(|value| !value.trim().is_empty())
+                    .unwrap_or_else(|| "Codex SDK 返回了失败响应".to_string()))
+            }
+            Err(_) => {}
+        }
+    }
+
+    if !raw_stderr.is_empty() {
+        return Err(raw_stderr);
+    }
+
+    if !raw_stdout.is_empty() {
+        return Err(raw_stdout);
+    }
+
+    Err("Codex SDK 返回空响应".to_string())
+}
+
+async fn run_ai_command_via_sdk(app: &AppHandle, prompt: &str) -> Result<String, String> {
+    let settings = load_codex_settings(app)?;
+    let install_dir = PathBuf::from(&settings.sdk_install_dir);
+    let bridge_path = sdk_bridge_script_path(&install_dir);
+    if !bridge_path.exists() {
+        return Err("Codex SDK bridge 脚本不存在，请在设置中重新安装 SDK".to_string());
+    }
+
+    let mut command = new_node_command(settings.node_path_override.as_deref()).await?;
+    command
+        .arg(&bridge_path)
+        .current_dir(&install_dir)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Failed to spawn Codex SDK bridge: {}", error))?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let payload = serde_json::to_vec(&serde_json::json!({ "prompt": prompt }))
+            .map_err(|error| format!("Failed to serialize SDK request: {}", error))?;
+        stdin
+            .write_all(&payload)
+            .await
+            .map_err(|error| format!("Failed to write SDK request: {}", error))?;
+    }
+
+    let output = child
+        .wait_with_output()
+        .await
+        .map_err(|error| format!("Failed to wait for Codex SDK bridge: {}", error))?;
+    parse_sdk_bridge_output(&output.stdout, &output.stderr)
+}
+
+async fn run_ai_command(app: &AppHandle, prompt: String) -> Result<String, String> {
+    let mut sdk_error = None;
+
+    if let Ok(settings) = load_codex_settings(app) {
+        if settings.sdk_enabled {
+            let runtime = inspect_sdk_runtime(app, &settings).await;
+            if runtime.effective_provider == "sdk" {
+                match run_ai_command_via_sdk(app, &prompt).await {
+                    Ok(result) => return Ok(result),
+                    Err(error) => {
+                        eprintln!("[codex-sdk] 调用失败，回退到 codex exec: {error}");
+                        sdk_error = Some(error);
+                    }
+                }
+            } else {
+                eprintln!("[codex-sdk] {}", runtime.status_message);
+            }
+        }
+    }
+
+    match run_ai_command_via_exec(prompt).await {
+        Ok(result) => Ok(result),
+        Err(exec_error) => match sdk_error {
+            Some(sdk_error) => Err(format!(
+                "Codex SDK 调用失败后回退 exec 也失败：SDK: {sdk_error}; exec: {exec_error}"
+            )),
+            None => Err(exec_error),
+        },
     }
 }
 
@@ -892,7 +998,7 @@ fn parse_ai_subtasks_response(raw: &str) -> Result<Vec<String>, String> {
 mod tests {
     use super::{
         build_one_shot_exec_args, compose_codex_prompt, extract_session_id_from_output,
-        parse_ai_subtasks_response,
+        parse_ai_subtasks_response, parse_sdk_bridge_output,
     };
 
     #[test]
@@ -971,10 +1077,19 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn parses_sdk_bridge_success_output() {
+        let output = parse_sdk_bridge_output(br#"{"ok":true,"text":"sdk output"}"#, &[])
+            .expect("parse sdk bridge success");
+
+        assert_eq!(output, "sdk output");
+    }
 }
 
 #[tauri::command]
 pub async fn ai_suggest_assignee(
+    app: AppHandle,
     task_description: String,
     employee_list: String,
 ) -> Result<String, String> {
@@ -982,20 +1097,24 @@ pub async fn ai_suggest_assignee(
         "Based on the following task description, suggest the best assignee from the employee list.\n\nTask: {}\n\nEmployees: {}\n\nRespond with just the employee ID and a brief reason.",
         task_description, employee_list
     );
-    run_ai_command(prompt).await
+    run_ai_command(&app, prompt).await
 }
 
 #[tauri::command]
-pub async fn ai_analyze_complexity(task_description: String) -> Result<String, String> {
+pub async fn ai_analyze_complexity(
+    app: AppHandle,
+    task_description: String,
+) -> Result<String, String> {
     let prompt = format!(
         "Analyze the complexity of this task on a scale of 1-10, and provide a brief breakdown.\n\nTask: {}",
         task_description
     );
-    run_ai_command(prompt).await
+    run_ai_command(&app, prompt).await
 }
 
 #[tauri::command]
 pub async fn ai_generate_comment(
+    app: AppHandle,
     task_title: String,
     task_description: String,
     context: String,
@@ -1004,11 +1123,12 @@ pub async fn ai_generate_comment(
         "Generate a progress assessment comment for this task.\n\nTitle: {}\nDescription: {}\nContext: {}",
         task_title, task_description, context
     );
-    run_ai_command(prompt).await
+    run_ai_command(&app, prompt).await
 }
 
 #[tauri::command]
 pub async fn ai_split_subtasks(
+    app: AppHandle,
     task_title: String,
     task_description: String,
 ) -> Result<Vec<String>, String> {
@@ -1024,6 +1144,6 @@ pub async fn ai_split_subtasks(
         task_title.trim(),
         task_description.trim()
     );
-    let raw = run_ai_command(prompt).await?;
+    let raw = run_ai_command(&app, prompt).await?;
     parse_ai_subtasks_response(&raw)
 }

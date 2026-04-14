@@ -136,6 +136,14 @@ pub struct CodexSessionEvent {
 pub struct CodexHealthCheck {
     pub codex_available: bool,
     pub codex_version: Option<String>,
+    pub node_available: bool,
+    pub node_version: Option<String>,
+    pub sdk_enabled: bool,
+    pub sdk_installed: bool,
+    pub sdk_version: Option<String>,
+    pub sdk_install_dir: String,
+    pub one_shot_effective_provider: String,
+    pub sdk_status_message: String,
     pub database_loaded: bool,
     pub database_path: Option<String>,
     pub shell_available: bool,
@@ -147,6 +155,23 @@ pub struct CodexHealthCheck {
 pub struct CodexRuntimeStatus {
     pub running: bool,
     pub session: Option<CodexSessionRecord>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSettings {
+    pub sdk_enabled: bool,
+    pub node_path_override: Option<String>,
+    pub sdk_install_dir: String,
+    pub one_shot_preferred_provider: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSdkInstallResult {
+    pub sdk_installed: bool,
+    pub sdk_version: Option<String>,
+    pub install_dir: String,
+    pub node_version: Option<String>,
+    pub message: String,
 }
 
 // ========== DTOs ==========
@@ -218,6 +243,13 @@ pub struct UpdateTask {
     pub ai_suggestion: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub last_codex_session_id: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdateCodexSettings {
+    pub sdk_enabled: Option<bool>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub node_path_override: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
