@@ -52,6 +52,7 @@
 - Rust toolchain
 - Tauri 2 运行环境
 - 本机已安装 `codex` 命令，并可在 shell 中执行
+- 安装 Rust `curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh`
 
 ## 开发命令
 
