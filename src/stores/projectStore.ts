@@ -27,7 +27,16 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
     set({ loading: true });
     try {
       const projects = await select<Project>("SELECT * FROM projects ORDER BY updated_at DESC");
-      set({ projects, loading: false });
+      set((state) => {
+        const currentProjectId = state.currentProject?.id;
+        return {
+          projects,
+          currentProject: currentProjectId
+            ? projects.find((project) => project.id === currentProjectId) ?? null
+            : null,
+          loading: false,
+        };
+      });
     } catch (e) {
       console.error("Failed to fetch projects:", e);
       set({ loading: false });

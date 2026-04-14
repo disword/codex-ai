@@ -1,5 +1,6 @@
 import { useEffect, useCallback } from "react";
 import { useDashboardStore } from "@/stores/dashboardStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Card } from "@/components/ui/card";
 import { Activity, RefreshCw } from "lucide-react";
@@ -7,14 +8,15 @@ import { formatDate } from "@/lib/utils";
 
 export function ActivityFeed() {
   const { recentActivities, fetchRecentActivities } = useDashboardStore();
+  const currentProjectId = useProjectStore((state) => state.currentProject?.id);
 
   useEffect(() => {
-    fetchRecentActivities(30);
-  }, [fetchRecentActivities]);
+    void fetchRecentActivities(30, currentProjectId);
+  }, [currentProjectId, fetchRecentActivities]);
 
   const refresh = useCallback(() => {
-    fetchRecentActivities(30);
-  }, [fetchRecentActivities]);
+    void fetchRecentActivities(30, currentProjectId);
+  }, [currentProjectId, fetchRecentActivities]);
 
   // Auto-refresh every 30 seconds
   useEffect(() => {

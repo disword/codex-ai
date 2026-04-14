@@ -2,17 +2,24 @@ import { useEffect, useState } from "react";
 import { useEmployeeStore } from "@/stores/employeeStore";
 import { EmployeeCard } from "./EmployeeCard";
 
-export function EmployeeList() {
+interface EmployeeListProps {
+  projectId?: string;
+}
+
+export function EmployeeList({ projectId }: EmployeeListProps) {
   const { employees, fetchEmployees } = useEmployeeStore();
   const [filter, setFilter] = useState<string>("all");
 
   useEffect(() => {
-    fetchEmployees();
+    void fetchEmployees();
   }, [fetchEmployees]);
 
+  const projectEmployees = projectId
+    ? employees.filter((employee) => employee.project_id === projectId)
+    : employees;
   const filtered = filter === "all"
-    ? employees
-    : employees.filter((e) => e.status === filter);
+    ? projectEmployees
+    : projectEmployees.filter((employee) => employee.status === filter);
 
   return (
     <div className="space-y-3">

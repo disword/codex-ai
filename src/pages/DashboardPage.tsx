@@ -1,5 +1,6 @@
 import { useEffect } from "react";
 import { useDashboardStore } from "@/stores/dashboardStore";
+import { useProjectStore } from "@/stores/projectStore";
 import { DashboardStats } from "@/components/dashboard/DashboardStats";
 import { ActivityFeed } from "@/components/dashboard/ActivityFeed";
 import { EmployeePerformanceChart } from "@/components/dashboard/EmployeePerformanceChart";
@@ -9,10 +10,11 @@ import { getStatusLabel, getStatusColor } from "@/lib/utils";
 
 export function DashboardPage() {
   const { stats, fetchStats } = useDashboardStore();
+  const currentProjectId = useProjectStore((state) => state.currentProject?.id);
 
   useEffect(() => {
-    fetchStats();
-  }, [fetchStats]);
+    void fetchStats(currentProjectId);
+  }, [currentProjectId, fetchStats]);
 
   return (
     <div className="space-y-6">

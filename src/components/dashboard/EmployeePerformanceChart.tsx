@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { select } from "@/lib/database";
-import type { EmployeeMetric, Employee } from "@/lib/types";
+import type { EmployeeMetric } from "@/lib/types";
+import { useProjectStore } from "@/stores/projectStore";
 import { Card } from "@/components/ui/card";
 import { BarChart3 } from "lucide-react";
 
@@ -12,28 +13,44 @@ interface PerformanceRow {
   success_rate: number | null;
 }
 
+interface EmployeeLookup {
+  id: string;
+  name: string;
+}
+
 export function EmployeePerformanceChart() {
   const [data, setData] = useState<PerformanceRow[]>([]);
   const [period, setPeriod] = useState<"7" | "30" | "90">("30");
+  const currentProjectId = useProjectStore((state) => state.currentProject?.id);
 
   useEffect(() => {
-    fetchData(period);
-  }, [period]);
+    void fetchData(period, currentProjectId);
+  }, [currentProjectId, period]);
 
-  const fetchData = async (days: string) => {
+  const fetchData = async (days: string, projectId?: string) => {
     try {
       const metrics = await select<EmployeeMetric>(
         `SELECT * FROM employee_metrics 
          WHERE period_start >= datetime('now', '-${days} days') 
          ORDER BY tasks_completed DESC`
       );
-      const employees = await select<Employee>("SELECT id, name FROM employees");
+      const employees = projectId
+        ? await select<EmployeeLookup>(
+            "SELECT id, name FROM employees WHERE project_id = $1",
+            [projectId]
+          )
+        : await select<EmployeeLookup>("SELECT id, name FROM employees");
 
       const empMap = new Map(employees.map((e) => [e.id, e.name]));
 
       // Aggregate by employee
       const aggregated = new Map<string, PerformanceRow>();
       for (const m of metrics) {
+        const employeeName = empMap.get(m.employee_id);
+        if (!employeeName) {
+          continue;
+        }
+
         const existing = aggregated.get(m.employee_id);
         if (existing) {
           existing.tasks_completed += m.tasks_completed;
@@ -50,7 +67,7 @@ export function EmployeePerformanceChart() {
         } else {
           aggregated.set(m.employee_id, {
             employee_id: m.employee_id,
-            employee_name: empMap.get(m.employee_id) ?? m.employee_id,
+            employee_name: employeeName,
             tasks_completed: m.tasks_completed,
             average_completion_time: m.average_completion_time,
             success_rate: m.success_rate,

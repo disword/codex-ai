@@ -21,6 +21,7 @@ interface TaskStore {
   tasks: Task[];
   subtasks: Record<string, Subtask[]>;
   comments: Record<string, Comment[]>;
+  activeProjectId?: string;
   loading: boolean;
   fetchTasks: (projectId?: string) => Promise<void>;
   fetchSubtasks: (taskId: string) => Promise<void>;
@@ -56,15 +57,16 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   tasks: [],
   subtasks: {},
   comments: {},
+  activeProjectId: undefined,
   loading: false,
 
   fetchTasks: async (projectId) => {
-    set({ loading: true });
+    set({ loading: true, activeProjectId: projectId });
     try {
       const tasks = projectId
         ? await select<Task>("SELECT * FROM tasks WHERE project_id = $1 ORDER BY updated_at DESC", [projectId])
         : await select<Task>("SELECT * FROM tasks ORDER BY updated_at DESC");
-      set({ tasks, loading: false });
+      set({ tasks, loading: false, activeProjectId: projectId });
     } catch (e) {
       console.error("Failed to fetch tasks:", e);
       set({ loading: false });
@@ -87,7 +89,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       description: data.description ?? null,
       assignee_id: data.assignee_id ?? null,
     });
-    await get().fetchTasks(options?.refreshProjectId);
+    await get().fetchTasks(options?.refreshProjectId ?? get().activeProjectId);
   },
 
   updateTaskStatus: async (id, status) => {
@@ -122,7 +124,7 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
 
   deleteTask: async (id) => {
     await deleteTaskCommand(id);
-    await get().fetchTasks();
+    await get().fetchTasks(get().activeProjectId);
   },
 
   addSubtask: async (taskId, title) => {

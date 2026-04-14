@@ -34,6 +34,7 @@ export function CodexControls({ employeeId, employeeStatus, model, reasoningEffo
   const updateTask = useTaskStore((s) => s.updateTask);
   const updateTaskStatus = useTaskStore((s) => s.updateTaskStatus);
   const projects = useProjectStore((s) => s.projects);
+  const currentProjectId = useProjectStore((s) => s.currentProject?.id);
   const fetchProjects = useProjectStore((s) => s.fetchProjects);
   const [taskDescription, setTaskDescription] = useState("");
   const [actionLoading, setActionLoading] = useState<"start" | "stop" | "restart" | null>(null);
@@ -45,6 +46,10 @@ export function CodexControls({ employeeId, employeeStatus, model, reasoningEffo
   const isRunning = employeeStatus === "online" || employeeStatus === "busy";
   const normalizedKeyword = taskKeyword.trim().toLowerCase();
   const eligibleTasks = tasks.filter((task) => {
+    if (currentProjectId && task.project_id !== currentProjectId) {
+      return false;
+    }
+
     if (!STARTABLE_TASK_STATUSES.includes(task.status)) {
       return false;
     }
@@ -73,7 +78,7 @@ export function CodexControls({ employeeId, employeeStatus, model, reasoningEffo
     let cancelled = false;
 
     setTaskDialogLoading(true);
-    void Promise.all([fetchTasks(), fetchProjects()])
+    void Promise.all([fetchTasks(currentProjectId), fetchProjects()])
       .catch((error) => {
         console.error("Failed to load tasks for employee start:", error);
       })
@@ -86,7 +91,7 @@ export function CodexControls({ employeeId, employeeStatus, model, reasoningEffo
     return () => {
       cancelled = true;
     };
-  }, [showTaskDialog, fetchProjects, fetchTasks]);
+  }, [showTaskDialog, currentProjectId, fetchProjects, fetchTasks]);
 
   useEffect(() => {
     if (!showTaskDialog) {

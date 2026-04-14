@@ -17,16 +17,19 @@ const ALL_PROJECTS_VALUE = "__all_projects__";
 
 export function KanbanPage() {
   const { fetchTasks } = useTaskStore();
-  const { projects, fetchProjects } = useProjectStore();
+  const { projects, currentProject, setCurrentProject, fetchProjects } = useProjectStore();
   const { fetchEmployees } = useEmployeeStore();
   const [showCreateDialog, setShowCreateDialog] = useState(false);
-  const [selectedProjectId, setSelectedProjectId] = useState<string | undefined>();
+  const currentProjectId = currentProject?.id;
 
   useEffect(() => {
-    fetchProjects();
-    fetchEmployees();
-    fetchTasks();
-  }, [fetchEmployees, fetchProjects, fetchTasks]);
+    void fetchProjects();
+    void fetchEmployees();
+  }, [fetchEmployees, fetchProjects]);
+
+  useEffect(() => {
+    void fetchTasks(currentProjectId);
+  }, [currentProjectId, fetchTasks]);
 
   return (
     <div className="h-full flex flex-col">
@@ -34,12 +37,15 @@ export function KanbanPage() {
         <div className="flex items-center gap-3">
           <h2 className="text-lg font-semibold">看板</h2>
           <Select
-            value={selectedProjectId ?? ALL_PROJECTS_VALUE}
+            value={currentProjectId ?? ALL_PROJECTS_VALUE}
             onValueChange={(value) => {
-              const val =
-                !value || value === ALL_PROJECTS_VALUE ? undefined : value;
-              setSelectedProjectId(val);
-              fetchTasks(val);
+              if (!value || value === ALL_PROJECTS_VALUE) {
+                setCurrentProject(null);
+                return;
+              }
+
+              const project = projects.find((item) => item.id === value);
+              setCurrentProject(project ?? null);
             }}
           >
             <SelectTrigger className="w-[220px] bg-background">
@@ -72,12 +78,12 @@ export function KanbanPage() {
         </button>
       </div>
       <div className="flex-1 overflow-hidden">
-        <KanbanBoard projectId={selectedProjectId} />
+        <KanbanBoard projectId={currentProjectId} />
       </div>
       <CreateTaskDialog
         open={showCreateDialog}
         onOpenChange={setShowCreateDialog}
-        projectId={selectedProjectId}
+        projectId={currentProjectId}
       />
     </div>
   );

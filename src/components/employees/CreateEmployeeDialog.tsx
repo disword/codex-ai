@@ -34,9 +34,14 @@ const NO_PROJECT_VALUE = "__no_project__";
 interface CreateEmployeeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  defaultProjectId?: string;
 }
 
-export function CreateEmployeeDialog({ open, onOpenChange }: CreateEmployeeDialogProps) {
+export function CreateEmployeeDialog({
+  open,
+  onOpenChange,
+  defaultProjectId,
+}: CreateEmployeeDialogProps) {
   const { createEmployee } = useEmployeeStore();
   const { projects, fetchProjects } = useProjectStore();
   const [name, setName] = useState("");
@@ -50,14 +55,14 @@ export function CreateEmployeeDialog({ open, onOpenChange }: CreateEmployeeDialo
 
   const handleOpen = (isOpen: boolean) => {
     if (isOpen) {
-      fetchProjects();
+      void fetchProjects();
       setName("");
       setRole("developer");
       setModel("gpt-5.4");
       setReasoningEffort("high");
       setSpecialization("");
       setSystemPrompt("");
-      setProjectId("");
+      setProjectId(defaultProjectId ?? "");
     }
     onOpenChange(isOpen);
   };

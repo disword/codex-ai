@@ -1,14 +1,9 @@
-import { useEffect } from "react";
 import { useDashboardStore } from "@/stores/dashboardStore";
 import { FolderKanban, ListTodo, Users, TrendingUp } from "lucide-react";
 import { Card } from "@/components/ui/card";
 
 export function DashboardStats() {
-  const { stats, fetchStats } = useDashboardStore();
-
-  useEffect(() => {
-    fetchStats();
-  }, [fetchStats]);
+  const stats = useDashboardStore((state) => state.stats);
 
   const cards = [
     {

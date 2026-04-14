@@ -1,10 +1,12 @@
 import { useState } from "react";
 import { EmployeeList } from "@/components/employees/EmployeeList";
 import { CreateEmployeeDialog } from "@/components/employees/CreateEmployeeDialog";
+import { useProjectStore } from "@/stores/projectStore";
 import { Plus } from "lucide-react";
 
 export function EmployeesPage() {
   const [showCreate, setShowCreate] = useState(false);
+  const currentProjectId = useProjectStore((state) => state.currentProject?.id);
 
   return (
     <div className="space-y-4">
@@ -19,8 +21,12 @@ export function EmployeesPage() {
         </button>
       </div>
 
-      <EmployeeList />
-      <CreateEmployeeDialog open={showCreate} onOpenChange={setShowCreate} />
+      <EmployeeList projectId={currentProjectId} />
+      <CreateEmployeeDialog
+        open={showCreate}
+        onOpenChange={setShowCreate}
+        defaultProjectId={currentProjectId}
+      />
     </div>
   );
 }
