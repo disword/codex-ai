@@ -24,7 +24,10 @@ pub(crate) fn now_sqlite() -> String {
 }
 
 pub(crate) fn database_path<R: Runtime>(app: &AppHandle<R>) -> Option<PathBuf> {
-    app.path().app_config_dir().ok().map(|dir| dir.join("codex-ai.db"))
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("codex-ai.db"))
 }
 
 pub(crate) async fn sqlite_pool<R: Runtime>(app: &AppHandle<R>) -> Result<SqlitePool, String> {
@@ -38,8 +41,59 @@ pub(crate) async fn sqlite_pool<R: Runtime>(app: &AppHandle<R>) -> Result<Sqlite
     Ok(pool.clone())
 }
 
+pub(crate) async fn log_database_startup_status<R: Runtime>(app: &AppHandle<R>) {
+    let path = database_path(app)
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let latest_registered_version = crate::db::migrations::latest_migration_version();
+
+    match sqlite_pool(app).await {
+        Ok(pool) => {
+            let migration_summary = sqlx::query_as::<_, (i64, Option<i64>, Option<String>)>(
+                r#"
+                SELECT
+                    COUNT(*) AS applied_count,
+                    MAX(version) AS current_version,
+                    (
+                        SELECT description
+                        FROM _sqlx_migrations
+                        WHERE success = 1
+                        ORDER BY version DESC
+                        LIMIT 1
+                    ) AS latest_description
+                FROM _sqlx_migrations
+                WHERE success = 1
+                "#,
+            )
+            .fetch_one(&pool)
+            .await;
+
+            match migration_summary {
+                Ok((applied_count, current_version, latest_description)) => {
+                    let current_version = current_version.unwrap_or_default();
+                    let pending_migrations =
+                        latest_registered_version.saturating_sub(current_version);
+
+                    println!("[db] SQLite 已加载: path={path}");
+                    println!(
+                        "[db] 迁移检查完成: applied_count={applied_count}, current_version={current_version}, latest_registered_version={latest_registered_version}, pending_migrations={pending_migrations}, latest_description={}",
+                        latest_description.as_deref().unwrap_or("none")
+                    );
+                }
+                Err(error) => {
+                    eprintln!("[db] SQLite 已加载，但读取迁移状态失败: path={path}, error={error}");
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("[db] SQLite 未加载: path={path}, error={error}");
+        }
+    }
+}
+
 pub(crate) fn normalize_optional_text(value: Option<&str>) -> Option<String> {
-    value.map(str::trim)
+    value
+        .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
 }
@@ -77,7 +131,9 @@ fn canonicalize_existing_dir(path: &str) -> Result<String, String> {
     Ok(canonical.to_string_lossy().to_string())
 }
 
-pub(crate) fn validate_project_repo_path(repo_path: Option<&str>) -> Result<Option<String>, String> {
+pub(crate) fn validate_project_repo_path(
+    repo_path: Option<&str>,
+) -> Result<Option<String>, String> {
     match normalize_optional_text(repo_path) {
         Some(path) => canonicalize_existing_dir(&path).map(Some),
         None => Ok(None),
@@ -309,22 +365,13 @@ async fn ensure_project_exists(pool: &SqlitePool, project_id: &str) -> Result<()
 async fn validate_assignee_for_project(
     pool: &SqlitePool,
     assignee_id: Option<&str>,
-    project_id: &str,
+    _project_id: &str,
 ) -> Result<(), String> {
     let Some(assignee_id) = assignee_id else {
         return Ok(());
     };
 
-    let employee = fetch_employee_by_id(pool, assignee_id).await?;
-    if let Some(employee_project_id) = employee.project_id {
-        if employee_project_id != project_id {
-            return Err(format!(
-                "员工 {} 归属项目 {}，不能分配到项目 {}",
-                employee.name, employee_project_id, project_id
-            ));
-        }
-    }
-
+    fetch_employee_by_id(pool, assignee_id).await?;
     Ok(())
 }
 
@@ -541,11 +588,9 @@ pub async fn update_project<R: Runtime>(
         touched = true;
     }
     if let Some(description) = updates.description {
-        separated
-            .push("description = ")
-            .push_bind_unseparated(
-                description.and_then(|value| normalize_optional_text(Some(&value))),
-            );
+        separated.push("description = ").push_bind_unseparated(
+            description.and_then(|value| normalize_optional_text(Some(&value))),
+        );
         touched = true;
     }
     if let Some(status) = updates.status {
@@ -705,19 +750,15 @@ pub async fn update_employee<R: Runtime>(
         touched = true;
     }
     if let Some(specialization) = updates.specialization {
-        separated
-            .push("specialization = ")
-            .push_bind_unseparated(
-                specialization.and_then(|value| normalize_optional_text(Some(&value))),
-            );
+        separated.push("specialization = ").push_bind_unseparated(
+            specialization.and_then(|value| normalize_optional_text(Some(&value))),
+        );
         touched = true;
     }
     if let Some(system_prompt) = updates.system_prompt {
-        separated
-            .push("system_prompt = ")
-            .push_bind_unseparated(
-                system_prompt.and_then(|value| normalize_optional_text(Some(&value))),
-            );
+        separated.push("system_prompt = ").push_bind_unseparated(
+            system_prompt.and_then(|value| normalize_optional_text(Some(&value))),
+        );
         touched = true;
     }
     if let Some(project_id) = updates.project_id {
@@ -822,7 +863,8 @@ pub async fn create_task<R: Runtime>(
 ) -> Result<Task, String> {
     let pool = sqlite_pool(&app).await?;
     ensure_project_exists(&pool, &payload.project_id).await?;
-    validate_assignee_for_project(&pool, payload.assignee_id.as_deref(), &payload.project_id).await?;
+    validate_assignee_for_project(&pool, payload.assignee_id.as_deref(), &payload.project_id)
+        .await?;
 
     let task = Task {
         id: new_id(),
@@ -880,7 +922,10 @@ pub async fn update_task<R: Runtime>(
 ) -> Result<Task, String> {
     let pool = sqlite_pool(&app).await?;
     let current = fetch_task_by_id(&pool, &id).await?;
-    let next_status = updates.status.clone().unwrap_or_else(|| current.status.clone());
+    let next_status = updates
+        .status
+        .clone()
+        .unwrap_or_else(|| current.status.clone());
 
     if let Some(assignee_id) = updates.assignee_id.as_ref() {
         validate_assignee_for_project(&pool, assignee_id.as_deref(), &current.project_id).await?;
@@ -899,11 +944,9 @@ pub async fn update_task<R: Runtime>(
         touched = true;
     }
     if let Some(description) = updates.description {
-        separated
-            .push("description = ")
-            .push_bind_unseparated(
-                description.and_then(|value| normalize_optional_text(Some(&value))),
-            );
+        separated.push("description = ").push_bind_unseparated(
+            description.and_then(|value| normalize_optional_text(Some(&value))),
+        );
         touched = true;
     }
     if let Some(status) = updates.status.clone() {
@@ -911,7 +954,9 @@ pub async fn update_task<R: Runtime>(
         touched = true;
     }
     if let Some(priority) = updates.priority {
-        separated.push("priority = ").push_bind_unseparated(priority);
+        separated
+            .push("priority = ")
+            .push_bind_unseparated(priority);
         touched = true;
     }
     if let Some(assignee_id) = updates.assignee_id {
@@ -1052,16 +1097,14 @@ pub async fn create_subtask<R: Runtime>(
     .unwrap_or(1);
 
     let id = new_id();
-    sqlx::query(
-        "INSERT INTO subtasks (id, task_id, title, sort_order) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(&id)
-    .bind(&payload.task_id)
-    .bind(title)
-    .bind(sort_order)
-    .execute(&pool)
-    .await
-    .map_err(|error| format!("Failed to create subtask: {}", error))?;
+    sqlx::query("INSERT INTO subtasks (id, task_id, title, sort_order) VALUES ($1, $2, $3, $4)")
+        .bind(&id)
+        .bind(&payload.task_id)
+        .bind(title)
+        .bind(sort_order)
+        .execute(&pool)
+        .await
+        .map_err(|error| format!("Failed to create subtask: {}", error))?;
 
     sqlx::query_as::<_, Subtask>("SELECT * FROM subtasks WHERE id = $1 LIMIT 1")
         .bind(&id)
