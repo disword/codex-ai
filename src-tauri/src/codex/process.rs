@@ -8,14 +8,14 @@ use std::time::{Duration, SystemTime};
 use serde::Deserialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::time::sleep;
 
 use crate::app::{
     fetch_codex_session_by_id, insert_codex_session_event, insert_codex_session_record, now_sqlite,
     sqlite_pool, update_codex_session_record, validate_runtime_working_dir,
 };
-use crate::codex::CodexManager;
+use crate::codex::{new_codex_command, CodexManager};
 use crate::db::models::{CodexExit, CodexOutput, CodexSession};
 
 const SUPPORTED_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"];
@@ -242,7 +242,25 @@ pub async fn start_codex(
     )
     .await?;
 
-    let mut cmd = Command::new("codex");
+    let mut cmd = match new_codex_command().await {
+        Ok(command) => command,
+        Err(error) => {
+            let message = format!("Failed to spawn codex: {}", error);
+            let ended_at = now_sqlite();
+            update_codex_session_record(
+                &app,
+                &session_record.id,
+                Some("failed"),
+                None,
+                None,
+                Some(Some(ended_at.as_str())),
+            )
+            .await?;
+            insert_codex_session_event(&pool, &session_record.id, "spawn_failed", Some(&message))
+                .await?;
+            return Err(message);
+        }
+    };
     let model = normalize_model(model.as_deref());
     let reasoning_effort = normalize_reasoning_effort(reasoning_effort.as_deref());
     let prompt = compose_codex_prompt(&task_description, system_prompt.as_deref());
@@ -755,7 +773,10 @@ pub async fn send_codex_input(
 
 /// Run a one-shot AI command using `codex exec`.
 async fn run_ai_command(prompt: String) -> Result<String, String> {
-    let output = Command::new("codex")
+    let mut cmd = new_codex_command()
+        .await
+        .map_err(|error| format!("Failed to spawn codex exec: {}", error))?;
+    let output = cmd
         .args(["exec", &prompt])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())

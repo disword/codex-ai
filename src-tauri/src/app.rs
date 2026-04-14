@@ -6,10 +6,9 @@ use chrono::{Duration, NaiveDateTime, Utc};
 use sqlx::{QueryBuilder, Sqlite, SqlitePool};
 use tauri::{AppHandle, Manager, Runtime, State};
 use tauri_plugin_sql::{DbInstances, DbPool};
-use tokio::process::Command;
 use uuid::Uuid;
 
-use crate::codex::CodexManager;
+use crate::codex::{new_codex_command, CodexManager};
 use crate::db::models::{
     CodexHealthCheck, CodexRuntimeStatus, CodexSessionRecord, Comment, CreateComment,
     CreateEmployee, CreateProject, CreateSubtask, CreateTask, Employee, EmployeeMetric, Project,
@@ -470,23 +469,25 @@ pub async fn health_check<R: Runtime>(app: AppHandle<R>) -> Result<CodexHealthCh
         None
     };
 
-    let codex_output = Command::new("codex")
-        .arg("--version")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .await;
-
-    let (codex_available, codex_version) = match codex_output {
-        Ok(output) if output.status.success() => (
-            true,
-            Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
-        ),
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            (false, (!stderr.is_empty()).then_some(stderr))
-        }
-        Err(_) => (false, None),
+    let (codex_available, codex_version) = match new_codex_command().await {
+        Ok(mut command) => match command
+            .arg("--version")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await
+        {
+            Ok(output) if output.status.success() => (
+                true,
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string()),
+            ),
+            Ok(output) => {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                (false, (!stderr.is_empty()).then_some(stderr))
+            }
+            Err(error) => (false, Some(format!("Failed to run codex --version: {}", error))),
+        },
+        Err(error) => (false, Some(error)),
     };
 
     Ok(CodexHealthCheck {
