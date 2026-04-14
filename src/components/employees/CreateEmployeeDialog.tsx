@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useEmployeeStore } from "@/stores/employeeStore";
 import { useProjectStore } from "@/stores/projectStore";
 import {
@@ -53,19 +53,22 @@ export function CreateEmployeeDialog({
   const [projectId, setProjectId] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const handleOpen = (isOpen: boolean) => {
-    if (isOpen) {
-      void fetchProjects();
-      setName("");
-      setRole("developer");
-      setModel("gpt-5.4");
-      setReasoningEffort("high");
-      setSpecialization("");
-      setSystemPrompt("");
-      setProjectId(defaultProjectId ?? "");
-    }
-    onOpenChange(isOpen);
+  const resetForm = () => {
+    setName("");
+    setRole("developer");
+    setModel("gpt-5.4");
+    setReasoningEffort("high");
+    setSpecialization("");
+    setSystemPrompt("");
+    setProjectId(defaultProjectId ?? "");
   };
+
+  useEffect(() => {
+    if (open) {
+      void fetchProjects();
+      resetForm();
+    }
+  }, [defaultProjectId, fetchProjects, open]);
 
   const handleCreate = async () => {
     if (!name.trim()) return;
@@ -80,14 +83,15 @@ export function CreateEmployeeDialog({
         system_prompt: systemPrompt.trim() || undefined,
         project_id: projectId || undefined,
       });
-      handleOpen(false);
+      resetForm();
+      onOpenChange(false);
     } finally {
       setSaving(false);
     }
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>添加员工</DialogTitle>
@@ -245,7 +249,7 @@ export function CreateEmployeeDialog({
 
           <div className="flex justify-end gap-2 pt-2">
             <button
-              onClick={() => handleOpen(false)}
+              onClick={() => onOpenChange(false)}
               className="px-3 py-1.5 text-sm border border-input rounded-md hover:bg-accent"
             >
               取消

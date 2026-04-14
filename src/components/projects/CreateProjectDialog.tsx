@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useProjectStore } from "@/stores/projectStore";
 import {
   Dialog,
@@ -22,14 +22,17 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
   const [repoPath, setRepoPath] = useState("");
   const [saving, setSaving] = useState(false);
 
-  const handleOpen = (isOpen: boolean) => {
-    if (isOpen) {
-      setName("");
-      setDescription("");
-      setRepoPath("");
-    }
-    onOpenChange(isOpen);
+  const resetForm = () => {
+    setName("");
+    setDescription("");
+    setRepoPath("");
   };
+
+  useEffect(() => {
+    if (open) {
+      resetForm();
+    }
+  }, [open]);
 
   const handleCreate = async () => {
     if (!name.trim()) return;
@@ -40,7 +43,8 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
         description: description.trim() || undefined,
         repo_path: repoPath.trim() || undefined,
       });
-      handleOpen(false);
+      resetForm();
+      onOpenChange(false);
     } finally {
       setSaving(false);
     }
@@ -58,7 +62,7 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
   };
 
   return (
-    <Dialog open={open} onOpenChange={handleOpen}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-md">
         <DialogHeader>
           <DialogTitle>新建项目</DialogTitle>
@@ -93,7 +97,7 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
 
           <div className="flex justify-end gap-2 pt-2">
             <button
-              onClick={() => handleOpen(false)}
+              onClick={() => onOpenChange(false)}
               className="px-3 py-1.5 text-sm border border-input rounded-md hover:bg-accent"
             >
               取消
