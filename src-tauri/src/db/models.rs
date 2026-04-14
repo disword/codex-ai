@@ -3,9 +3,7 @@
 use serde::{Deserialize, Deserializer, Serialize};
 use sqlx::FromRow;
 
-fn deserialize_explicit_nullable<'de, D, T>(
-    deserializer: D,
-) -> Result<Option<Option<T>>, D::Error>
+fn deserialize_explicit_nullable<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: Deserializer<'de>,
     T: Deserialize<'de>,
@@ -275,10 +273,9 @@ mod tests {
 
     #[test]
     fn employee_update_keeps_nullable_fields() {
-        let payload: UpdateEmployee = serde_json::from_str(
-            r#"{"name":"Alice","specialization":null,"project_id":"proj-1"}"#,
-        )
-        .expect("deserialize employee update");
+        let payload: UpdateEmployee =
+            serde_json::from_str(r#"{"name":"Alice","specialization":null,"project_id":"proj-1"}"#)
+                .expect("deserialize employee update");
 
         assert_eq!(payload.specialization, Some(None));
         assert_eq!(payload.project_id, Some(Some("proj-1".to_string())));
@@ -286,10 +283,9 @@ mod tests {
 
     #[test]
     fn task_update_keeps_nullable_fields() {
-        let payload: UpdateTask = serde_json::from_str(
-            r#"{"description":null,"assignee_id":null,"complexity":3}"#,
-        )
-        .expect("deserialize task update");
+        let payload: UpdateTask =
+            serde_json::from_str(r#"{"description":null,"assignee_id":null,"complexity":3}"#)
+                .expect("deserialize task update");
 
         assert_eq!(payload.description, Some(None));
         assert_eq!(payload.assignee_id, Some(None));

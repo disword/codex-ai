@@ -298,3 +298,10 @@ pub fn get_all_migrations() -> Vec<Migration> {
         },
     ]
 }
+
+pub fn latest_migration_version() -> i64 {
+    get_all_migrations()
+        .last()
+        .map(|migration| migration.version)
+        .unwrap_or_default()
+}
