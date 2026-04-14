@@ -46,6 +46,37 @@ export function getStatusLabel(status: string): string {
   return labels[status] || status;
 }
 
+export function getActivityActionLabel(action: string): string {
+  const labels: Record<string, string> = {
+    task_created: "创建任务",
+    task_status_changed: "任务状态变更",
+    task_deleted: "删除任务",
+  };
+  return labels[action] || action;
+}
+
+export function getActivityDetailsLabel(action: string, details: string | null | undefined): string | null {
+  if (!details) {
+    return null;
+  }
+
+  if (action === "task_status_changed") {
+    const separator = " -> ";
+    const separatorIndex = details.lastIndexOf(separator);
+
+    if (separatorIndex > 0) {
+      const subject = details.slice(0, separatorIndex).trim();
+      const nextStatus = details.slice(separatorIndex + separator.length).trim();
+
+      if (subject && nextStatus) {
+        return `${subject} -> ${getStatusLabel(nextStatus)}`;
+      }
+    }
+  }
+
+  return details;
+}
+
 export function getPriorityColor(priority: string): string {
   const colors: Record<string, string> = {
     low: "text-slate-500",
