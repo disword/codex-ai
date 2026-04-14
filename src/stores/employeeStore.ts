@@ -3,6 +3,7 @@ import { select } from "@/lib/database";
 import {
   createEmployee as createEmployeeCommand,
   deleteEmployee as deleteEmployeeCommand,
+  getCodexSessionStatus,
   updateEmployee as updateEmployeeCommand,
   updateEmployeeStatus as updateEmployeeStatusCommand,
 } from "@/lib/backend";
@@ -19,14 +20,17 @@ interface EmployeeStore {
   employees: Employee[];
   loading: boolean;
   codexProcesses: Record<string, CodexProcessState>;
+  taskLogs: Record<string, string[]>;
   fetchEmployees: () => Promise<void>;
+  refreshCodexRuntimeStatus: (employeeId: string) => Promise<void>;
   createEmployee: (data: { name: string; role: string; model?: CodexModelId; reasoning_effort?: ReasoningEffort; specialization?: string; system_prompt?: string; project_id?: string }) => Promise<void>;
   updateEmployee: (id: string, updates: Partial<Pick<Employee, "name" | "role" | "model" | "reasoning_effort" | "specialization" | "system_prompt" | "project_id" | "status">>) => Promise<void>;
   deleteEmployee: (id: string) => Promise<void>;
   updateEmployeeStatus: (id: string, status: string) => Promise<void>;
-  addCodexOutput: (employeeId: string, line: string) => void;
+  addCodexOutput: (employeeId: string, line: string, taskId?: string | null) => void;
   setCodexRunning: (employeeId: string, running: boolean, activeTaskId?: string | null) => void;
   clearCodexOutput: (employeeId: string) => void;
+  clearTaskCodexOutput: (taskId: string) => void;
   initCodexListeners: () => () => void;
 }
 
@@ -40,19 +44,88 @@ function releaseCodexListeners() {
   codexListenersInitPromise = null;
 }
 
+function deriveEmployeeRuntimeStatus(employee: Employee, runtime: Awaited<ReturnType<typeof getCodexSessionStatus>>) {
+  if (runtime.running) {
+    return "busy";
+  }
+
+  if (runtime.session?.status === "failed") {
+    return "error";
+  }
+
+  if (employee.status === "busy" || employee.status === "online") {
+    return "offline";
+  }
+
+  return employee.status;
+}
+
 export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   employees: [],
   loading: false,
   codexProcesses: {},
+  taskLogs: {},
 
   fetchEmployees: async () => {
     set({ loading: true });
     try {
       const employees = await select<Employee>("SELECT * FROM employees ORDER BY created_at");
-      set({ employees, loading: false });
+      const runtimeResults = await Promise.allSettled(
+        employees.map(async (employee) => [employee.id, await getCodexSessionStatus(employee.id)] as const)
+      );
+      const runtimeMap = new Map(
+        runtimeResults
+          .filter((result): result is PromiseFulfilledResult<readonly [string, Awaited<ReturnType<typeof getCodexSessionStatus>>]> => result.status === "fulfilled")
+          .map((result) => result.value)
+      );
+
+      set((state) => ({
+        employees: employees.map((employee) => {
+          const runtime = runtimeMap.get(employee.id);
+          return runtime
+            ? { ...employee, status: deriveEmployeeRuntimeStatus(employee, runtime) }
+            : employee;
+        }),
+        codexProcesses: employees.reduce<Record<string, CodexProcessState>>((acc, employee) => {
+          const runtime = runtimeMap.get(employee.id);
+          const previous = state.codexProcesses[employee.id];
+
+          acc[employee.id] = {
+            output: previous?.output ?? [],
+            running: runtime?.running ?? false,
+            activeTaskId: runtime?.running ? runtime.session?.task_id ?? null : null,
+          };
+
+          return acc;
+        }, { ...state.codexProcesses }),
+        loading: false,
+      }));
     } catch (e) {
       console.error("Failed to fetch employees:", e);
       set({ loading: false });
+    }
+  },
+
+  refreshCodexRuntimeStatus: async (employeeId) => {
+    try {
+      const runtime = await getCodexSessionStatus(employeeId);
+      set((state) => ({
+        employees: state.employees.map((employee) => (
+          employee.id === employeeId
+            ? { ...employee, status: deriveEmployeeRuntimeStatus(employee, runtime) }
+            : employee
+        )),
+        codexProcesses: {
+          ...state.codexProcesses,
+          [employeeId]: {
+            output: state.codexProcesses[employeeId]?.output ?? [],
+            running: runtime.running,
+            activeTaskId: runtime.running ? runtime.session?.task_id ?? null : null,
+          },
+        },
+      }));
+    } catch (error) {
+      console.error(`Failed to refresh codex runtime status for ${employeeId}:`, error);
     }
   },
 
@@ -87,7 +160,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     }));
   },
 
-  addCodexOutput: (employeeId, line) => {
+  addCodexOutput: (employeeId, line, taskId) => {
     set((state) => ({
       codexProcesses: {
         ...state.codexProcesses,
@@ -97,6 +170,12 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
           running: state.codexProcesses[employeeId]?.running ?? false,
         },
       },
+      taskLogs: taskId
+        ? {
+            ...state.taskLogs,
+            [taskId]: [...(state.taskLogs[taskId] ?? []).slice(-199), line],
+          }
+        : state.taskLogs,
     }));
   },
 
@@ -127,17 +206,30 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     }));
   },
 
+  clearTaskCodexOutput: (taskId) => {
+    set((state) => ({
+      taskLogs: {
+        ...state.taskLogs,
+        [taskId]: [],
+      },
+    }));
+  },
+
   initCodexListeners: () => {
     codexListenerRefCount += 1;
 
     if (!codexListenersInitPromise && !codexListenersCleanup) {
       codexListenersInitPromise = Promise.all([
         onCodexOutput((output: CodexOutput) => {
-          get().addCodexOutput(output.employee_id, output.line);
+          get().addCodexOutput(output.employee_id, output.line, output.task_id);
         }),
         onCodexExit((exit) => {
+          get().addCodexOutput(
+            exit.employee_id,
+            `[EXIT] Code: ${exit.code ?? "unknown"}`,
+            exit.task_id
+          );
           get().setCodexRunning(exit.employee_id, false, null);
-          get().addCodexOutput(exit.employee_id, `[EXIT] Code: ${exit.code ?? "unknown"}`);
           void get().updateEmployeeStatus(exit.employee_id, "offline");
         }),
       ])

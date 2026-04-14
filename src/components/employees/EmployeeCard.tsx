@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { CODEX_MODEL_OPTIONS, REASONING_EFFORT_OPTIONS, type Employee } from "@/lib/types";
 import { useEmployeeStore } from "@/stores/employeeStore";
 import { EmployeeStatusBadge } from "./EmployeeStatusBadge";
+import { DeleteEmployeeDialog } from "./DeleteEmployeeDialog";
 import { EditEmployeeDialog } from "./EditEmployeeDialog";
 import { CodexControls } from "@/components/codex/CodexControls";
 import { CodexTerminal } from "@/components/codex/CodexTerminal";
@@ -19,11 +20,12 @@ const MAX_TASKS = 5;
 export function EmployeeCard({ employee, taskCount = 0 }: EmployeeCardProps) {
   const deleteEmployee = useEmployeeStore((s) => s.deleteEmployee);
   const updateEmployeeStatus = useEmployeeStore((s) => s.updateEmployeeStatus);
-  const stopCodex = useEmployeeStore((s) => s.clearCodexOutput);
+  const clearCodexOutput = useEmployeeStore((s) => s.clearCodexOutput);
   const isRunning = useEmployeeStore((s) => s.codexProcesses[employee.id]?.running ?? false);
   const [showTerminal, setShowTerminal] = useState(false);
   const [showEdit, setShowEdit] = useState(false);
-  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [showDeleteDialog, setShowDeleteDialog] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   const workload = Math.min((taskCount / MAX_TASKS) * 100, 100);
 
@@ -34,14 +36,15 @@ export function EmployeeCard({ employee, taskCount = 0 }: EmployeeCardProps) {
   }, [isRunning]);
 
   const handleDelete = async () => {
-    if (!confirmDelete) {
-      setConfirmDelete(true);
-      setTimeout(() => setConfirmDelete(false), 3000);
-      return;
+    setDeleting(true);
+    try {
+      await updateEmployeeStatus(employee.id, "offline");
+      clearCodexOutput(employee.id);
+      await deleteEmployee(employee.id);
+      setShowDeleteDialog(false);
+    } finally {
+      setDeleting(false);
     }
-    await updateEmployeeStatus(employee.id, "offline");
-    stopCodex(employee.id);
-    await deleteEmployee(employee.id);
   };
 
   const roleLabels: Record<string, string> = {
@@ -121,13 +124,10 @@ export function EmployeeCard({ employee, taskCount = 0 }: EmployeeCardProps) {
           <Pencil className="h-3.5 w-3.5" />
         </button>
         <button
-          onClick={handleDelete}
-          className={`p-1 transition-colors ${
-            confirmDelete
-              ? "text-destructive"
-              : "text-muted-foreground hover:text-destructive"
-          }`}
-          title={confirmDelete ? "再次点击确认删除" : "删除员工"}
+          onClick={() => setShowDeleteDialog(true)}
+          disabled={deleting}
+          className="p-1 text-muted-foreground transition-colors hover:text-destructive disabled:opacity-50"
+          title="删除员工"
         >
           <Trash2 className="h-3.5 w-3.5" />
         </button>
@@ -137,6 +137,16 @@ export function EmployeeCard({ employee, taskCount = 0 }: EmployeeCardProps) {
         open={showEdit}
         onOpenChange={setShowEdit}
         employee={employee}
+      />
+
+      <DeleteEmployeeDialog
+        open={showDeleteDialog}
+        onOpenChange={(open) => {
+          if (!deleting) setShowDeleteDialog(open);
+        }}
+        employee={employee}
+        deleting={deleting}
+        onConfirm={handleDelete}
       />
     </div>
   );
