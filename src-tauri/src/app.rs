@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use chrono::{Duration, NaiveDateTime, Utc};
@@ -20,13 +20,19 @@ use crate::db::models::{
     CodexHealthCheck, CodexRuntimeStatus, CodexSessionRecord, Comment, CreateComment,
     CreateEmployee, CreateProject, CreateSubtask, CreateTask, DatabaseBackupResult,
     DatabaseRestoreResult, Employee, EmployeeMetric, Project, Subtask, Task, TaskAttachment,
-    UpdateEmployee, UpdateProject, UpdateTask,
+    TaskLatestReview, UpdateEmployee, UpdateProject, UpdateTask,
 };
 
 pub const DB_URL: &str = "sqlite:codex-ai.db";
 const DB_FILE_NAME: &str = "codex-ai.db";
 const DB_AUTO_IMPORT_BACKUP_PREFIX: &str = "codex-ai.pre-import-backup";
 const SQLITE_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
+const REVIEW_DIFF_CHAR_LIMIT: usize = 120_000;
+const REVIEW_UNTRACKED_FILE_LIMIT: usize = 5;
+const REVIEW_UNTRACKED_FILE_SIZE_LIMIT: u64 = 16 * 1024;
+const REVIEW_UNTRACKED_TOTAL_CHAR_LIMIT: usize = 48_000;
+const REVIEW_REPORT_START_TAG: &str = "<review_report>";
+const REVIEW_REPORT_END_TAG: &str = "</review_report>";
 
 struct DatabaseMigrationStatus {
     applied_count: i64,
@@ -628,6 +634,214 @@ pub(crate) fn validate_runtime_working_dir(working_dir: Option<&str>) -> Result<
     Ok(resolved)
 }
 
+fn truncate_review_text(value: &str, limit: usize) -> (String, bool) {
+    let trimmed = value.trim();
+    if trimmed.chars().count() <= limit {
+        return (trimmed.to_string(), false);
+    }
+
+    let truncated = trimmed.chars().take(limit).collect::<String>();
+    (truncated, true)
+}
+
+fn is_supported_review_text_extension(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase())
+            .as_deref(),
+        Some(
+            "ts" | "tsx"
+                | "js"
+                | "jsx"
+                | "json"
+                | "rs"
+                | "md"
+                | "css"
+                | "scss"
+                | "html"
+                | "yml"
+                | "yaml"
+                | "toml"
+                | "sql"
+                | "sh"
+                | "txt"
+        )
+    )
+}
+
+fn run_git_text(repo_path: &str, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo_path)
+        .args(args)
+        .output()
+        .map_err(|error| format!("执行 git {:?} 失败: {}", args, error))?;
+
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+    } else {
+        Err(String::from_utf8_lossy(&output.stderr).trim().to_string())
+    }
+}
+
+fn read_untracked_review_snippets(repo_path: &str, untracked_files: &[String]) -> String {
+    let mut snippets = Vec::new();
+    let mut consumed_chars = 0usize;
+
+    for relative_path in untracked_files.iter().take(REVIEW_UNTRACKED_FILE_LIMIT) {
+        if consumed_chars >= REVIEW_UNTRACKED_TOTAL_CHAR_LIMIT {
+            break;
+        }
+
+        let full_path = Path::new(repo_path).join(relative_path);
+        let metadata = match fs::metadata(&full_path) {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+
+        if !metadata.is_file()
+            || metadata.len() > REVIEW_UNTRACKED_FILE_SIZE_LIMIT
+            || !is_supported_review_text_extension(&full_path)
+        {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&full_path) {
+            Ok(content) => content,
+            Err(_) => continue,
+        };
+        let remaining = REVIEW_UNTRACKED_TOTAL_CHAR_LIMIT.saturating_sub(consumed_chars);
+        if remaining == 0 {
+            break;
+        }
+
+        let (snippet, truncated) = truncate_review_text(&content, remaining.min(12_000));
+        if snippet.is_empty() {
+            continue;
+        }
+
+        consumed_chars += snippet.chars().count();
+        snippets.push(format!(
+            "### {}\n```text\n{}\n```\n{}",
+            relative_path,
+            snippet,
+            if truncated {
+                "（内容已截断）"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    if snippets.is_empty() {
+        "（无可直接读取的未跟踪文本文件内容）".to_string()
+    } else {
+        snippets.join("\n\n")
+    }
+}
+
+fn collect_task_review_context(repo_path: &str) -> Result<String, String> {
+    let status_output = run_git_text(repo_path, &["status", "--short"])?;
+    let status_trimmed = status_output.trim();
+    if status_trimmed.is_empty() {
+        return Err("当前工作区没有可审核的代码改动".to_string());
+    }
+
+    let unstaged_stat = run_git_text(repo_path, &["diff", "--no-ext-diff", "--stat"])?;
+    let unstaged_diff = run_git_text(repo_path, &["diff", "--no-ext-diff"])?;
+    let staged_stat = run_git_text(repo_path, &["diff", "--no-ext-diff", "--stat", "--cached"])?;
+    let staged_diff = run_git_text(repo_path, &["diff", "--no-ext-diff", "--cached"])?;
+    let untracked_output =
+        run_git_text(repo_path, &["ls-files", "--others", "--exclude-standard"])?;
+    let untracked_files = untracked_output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    let combined_diff = [staged_diff.trim(), unstaged_diff.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    if combined_diff.trim().is_empty() && untracked_files.is_empty() {
+        return Err("当前工作区没有可审核的代码 diff".to_string());
+    }
+
+    let combined_stat = [staged_stat.trim(), unstaged_stat.trim()]
+        .into_iter()
+        .filter(|value| !value.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (diff_body, diff_truncated) = truncate_review_text(&combined_diff, REVIEW_DIFF_CHAR_LIMIT);
+    let untracked_section = if untracked_files.is_empty() {
+        "（无未跟踪文件）".to_string()
+    } else {
+        format!(
+            "未跟踪文件列表：\n{}\n\n未跟踪文本文件摘录：\n{}",
+            untracked_files
+                .iter()
+                .map(|path| format!("- {}", path))
+                .collect::<Vec<_>>()
+                .join("\n"),
+            read_untracked_review_snippets(repo_path, &untracked_files),
+        )
+    };
+
+    Ok(format!(
+        "## Git 状态\n{}\n\n## Diff 概览\n{}\n\n## 完整 Diff\n{}\n{}\n\n## 未跟踪文件\n{}",
+        status_trimmed,
+        if combined_stat.trim().is_empty() {
+            "（无 diff 统计）"
+        } else {
+            combined_stat.trim()
+        },
+        if diff_body.trim().is_empty() {
+            "（无已跟踪文件 diff）"
+        } else {
+            diff_body.trim()
+        },
+        if diff_truncated {
+            "\n（完整 diff 已截断）"
+        } else {
+            ""
+        },
+        untracked_section
+    ))
+}
+
+fn build_task_review_prompt(task: &Task, project: &Project, review_context: &str) -> String {
+    format!(
+        "你正在执行一次只读代码审查。\n\
+要求：\n\
+- 只允许阅读和分析代码，禁止修改任何文件，禁止执行 git commit/reset/checkout/merge/rebase 等写操作\n\
+- 审核范围仅限下方提供的任务信息和当前工作区改动\n\
+- 最终结论必须且只能输出在 {start_tag} 和 {end_tag} 之间\n\
+- 报告必须使用中文 Markdown，包含以下小节：## 结论、## 阻断问题、## 风险提醒、## 改进建议、## 验证缺口\n\
+- 如果没有阻断问题，明确写“无阻断问题”\n\
+- 如果 diff 信息被截断，要把这件事写进“验证缺口”\n\n\
+任务标题：{title}\n\
+任务状态：{status}\n\
+任务优先级：{priority}\n\
+项目名称：{project_name}\n\
+仓库路径：{repo_path}\n\
+任务描述：{description}\n\n\
+{review_context}",
+        start_tag = REVIEW_REPORT_START_TAG,
+        end_tag = REVIEW_REPORT_END_TAG,
+        title = task.title.trim(),
+        status = task.status.trim(),
+        priority = task.priority.trim(),
+        project_name = project.name.trim(),
+        repo_path = project.repo_path.as_deref().unwrap_or("（未配置）"),
+        description = task.description.as_deref().unwrap_or("（未填写）"),
+        review_context = review_context,
+    )
+}
+
 fn task_attachments_root_dir<R: Runtime>(app: &AppHandle<R>) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
@@ -879,6 +1093,7 @@ pub(crate) async fn insert_codex_session_record<R: Runtime>(
     task_id: Option<&str>,
     working_dir: Option<&str>,
     resume_session_id: Option<&str>,
+    session_kind: &str,
     status: &str,
 ) -> Result<CodexSessionRecord, String> {
     let pool = sqlite_pool(app).await?;
@@ -901,6 +1116,7 @@ pub(crate) async fn insert_codex_session_record<R: Runtime>(
         project_id,
         cli_session_id: None,
         working_dir: working_dir.map(ToOwned::to_owned),
+        session_kind: session_kind.to_string(),
         status: status.to_string(),
         started_at: now_sqlite(),
         ended_at: None,
@@ -910,7 +1126,7 @@ pub(crate) async fn insert_codex_session_record<R: Runtime>(
     };
 
     sqlx::query(
-        "INSERT INTO codex_sessions (id, employee_id, task_id, project_id, cli_session_id, working_dir, status, started_at, ended_at, exit_code, resume_session_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+        "INSERT INTO codex_sessions (id, employee_id, task_id, project_id, cli_session_id, working_dir, session_kind, status, started_at, ended_at, exit_code, resume_session_id, created_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)",
     )
     .bind(&record.id)
     .bind(&record.employee_id)
@@ -918,6 +1134,7 @@ pub(crate) async fn insert_codex_session_record<R: Runtime>(
     .bind(&record.project_id)
     .bind(&record.cli_session_id)
     .bind(&record.working_dir)
+    .bind(&record.session_kind)
     .bind(&record.status)
     .bind(&record.started_at)
     .bind(&record.ended_at)
@@ -1066,6 +1283,23 @@ async fn validate_assignee_for_project(
     };
 
     fetch_employee_by_id(pool, assignee_id).await?;
+    Ok(())
+}
+
+async fn validate_reviewer_for_project(
+    pool: &SqlitePool,
+    reviewer_id: Option<&str>,
+    _project_id: &str,
+) -> Result<(), String> {
+    let Some(reviewer_id) = reviewer_id else {
+        return Ok(());
+    };
+
+    let reviewer = fetch_employee_by_id(pool, reviewer_id).await?;
+    if reviewer.role != "reviewer" {
+        return Err(format!("员工 {} 不是审查员角色", reviewer.name));
+    }
+
     Ok(())
 }
 
@@ -1396,6 +1630,79 @@ pub async fn get_codex_session_status<R: Runtime>(
         manager.get_process(&employee_id)
     };
 
+    let running_process = if let Some(process) = running_process {
+        let process_state = {
+            let mut child = process.child.lock().await;
+            child.try_wait()
+        };
+
+        match process_state {
+            Ok(None) => Some(process),
+            Ok(Some(exit_code)) => {
+                let current = fetch_codex_session_by_id(&app, &process.session_record_id)
+                    .await
+                    .ok();
+                if let Some(current) = current {
+                    if !matches!(current.status.as_str(), "exited" | "failed") {
+                        let final_status = if current.status == "stopping" || exit_code == 0 {
+                            "exited"
+                        } else {
+                            "failed"
+                        };
+                        let ended_at = now_sqlite();
+                        let _ = update_codex_session_record(
+                            &app,
+                            &process.session_record_id,
+                            Some(final_status),
+                            None,
+                            Some(Some(exit_code)),
+                            Some(Some(ended_at.as_str())),
+                        )
+                        .await;
+                    }
+                }
+
+                let mut manager = state.lock().map_err(|error| error.to_string())?;
+                manager.remove_process(&employee_id);
+                None
+            }
+            Err(error) => {
+                let current = fetch_codex_session_by_id(&app, &process.session_record_id)
+                    .await
+                    .ok();
+                if let Some(current) = current {
+                    if !matches!(current.status.as_str(), "exited" | "failed") {
+                        let ended_at = now_sqlite();
+                        let _ = update_codex_session_record(
+                            &app,
+                            &process.session_record_id,
+                            Some("failed"),
+                            None,
+                            Some(None),
+                            Some(Some(ended_at.as_str())),
+                        )
+                        .await;
+                        if let Ok(pool) = sqlite_pool(&app).await {
+                            let _ = insert_codex_session_event(
+                                &pool,
+                                &process.session_record_id,
+                                "session_failed",
+                                Some(&format!("运行态检查失败: {}", error)),
+                            )
+                            .await;
+                        }
+                    }
+                }
+
+                let mut manager = state.lock().map_err(|error| error.to_string())?;
+                manager.remove_process(&employee_id);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let session = if let Some(process) = running_process.as_ref() {
         Some(fetch_codex_session_by_id(&app, &process.session_record_id).await?)
     } else {
@@ -1413,6 +1720,110 @@ pub async fn get_codex_session_status<R: Runtime>(
         running: running_process.is_some(),
         session,
     })
+}
+
+#[tauri::command]
+pub async fn get_task_latest_review<R: Runtime>(
+    app: AppHandle<R>,
+    task_id: String,
+) -> Result<Option<TaskLatestReview>, String> {
+    let pool = sqlite_pool(&app).await?;
+    let session = sqlx::query_as::<_, CodexSessionRecord>(
+        "SELECT * FROM codex_sessions WHERE task_id = $1 AND session_kind = 'review' ORDER BY started_at DESC LIMIT 1",
+    )
+    .bind(&task_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("Failed to fetch task latest review session: {}", error))?;
+
+    let Some(session) = session else {
+        return Ok(None);
+    };
+
+    let report = sqlx::query_scalar::<_, Option<String>>(
+        "SELECT message FROM codex_session_events WHERE session_id = $1 AND event_type = 'review_report' ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&session.id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("Failed to fetch task latest review report: {}", error))?
+    .flatten();
+
+    let reviewer_name = match session.employee_id.as_deref() {
+        Some(employee_id) => sqlx::query_scalar::<_, Option<String>>(
+            "SELECT name FROM employees WHERE id = $1 LIMIT 1",
+        )
+        .bind(employee_id)
+        .fetch_optional(&pool)
+        .await
+        .map_err(|error| format!("Failed to fetch task reviewer name: {}", error))?
+        .flatten(),
+        None => None,
+    };
+
+    Ok(Some(TaskLatestReview {
+        session,
+        report,
+        reviewer_name,
+    }))
+}
+
+#[tauri::command]
+pub async fn start_task_code_review(
+    app: AppHandle,
+    state: State<'_, Arc<Mutex<CodexManager>>>,
+    task_id: String,
+) -> Result<(), String> {
+    let pool = sqlite_pool(&app).await?;
+    let task = fetch_task_by_id(&pool, &task_id).await?;
+    if task.status != "review" {
+        return Err("只有“审核中”的任务才能发起代码审核".to_string());
+    }
+
+    let reviewer_id = task
+        .reviewer_id
+        .as_deref()
+        .ok_or_else(|| "请先为任务指定审查员".to_string())?;
+    let reviewer = fetch_employee_by_id(&pool, reviewer_id).await?;
+    if reviewer.role != "reviewer" {
+        return Err(format!("员工 {} 不是审查员角色", reviewer.name));
+    }
+
+    let project = fetch_project_by_id(&pool, &task.project_id).await?;
+    let repo_path = project
+        .repo_path
+        .clone()
+        .ok_or_else(|| "当前项目未配置仓库路径，无法审核代码".to_string())?;
+    let review_context = collect_task_review_context(&repo_path)?;
+    let review_prompt = build_task_review_prompt(&task, &project, &review_context);
+
+    crate::codex::start_codex(
+        app.clone(),
+        state,
+        reviewer.id.clone(),
+        review_prompt,
+        Some(reviewer.model.clone()),
+        Some(reviewer.reasoning_effort.clone()),
+        reviewer.system_prompt.clone(),
+        Some(repo_path),
+        Some(task.id.clone()),
+        None,
+        None,
+        Some("review".to_string()),
+    )
+    .await?;
+
+    insert_activity_log(
+        &pool,
+        "task_review_requested",
+        &format!("{} 发起代码审核", reviewer.name),
+        Some(reviewer.id.as_str()),
+        Some(task.id.as_str()),
+        Some(task.project_id.as_str()),
+    )
+    .await?;
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -1759,9 +2170,11 @@ pub async fn create_task<R: Runtime>(
         priority: payload.priority.unwrap_or_else(|| "medium".to_string()),
         project_id: payload.project_id,
         assignee_id: normalize_optional_text(payload.assignee_id.as_deref()),
+        reviewer_id: None,
         complexity: None,
         ai_suggestion: None,
         last_codex_session_id: None,
+        last_review_session_id: None,
         created_at: now_sqlite(),
         updated_at: now_sqlite(),
     };
@@ -1922,6 +2335,9 @@ pub async fn update_task<R: Runtime>(
     if let Some(assignee_id) = updates.assignee_id.as_ref() {
         validate_assignee_for_project(&pool, assignee_id.as_deref(), &current.project_id).await?;
     }
+    if let Some(reviewer_id) = updates.reviewer_id.as_ref() {
+        validate_reviewer_for_project(&pool, reviewer_id.as_deref(), &current.project_id).await?;
+    }
 
     let mut builder = QueryBuilder::<Sqlite>::new("UPDATE tasks SET ");
     let mut separated = builder.separated(", ");
@@ -1957,6 +2373,12 @@ pub async fn update_task<R: Runtime>(
             .push_bind_unseparated(assignee_id);
         touched = true;
     }
+    if let Some(reviewer_id) = updates.reviewer_id {
+        separated
+            .push("reviewer_id = ")
+            .push_bind_unseparated(reviewer_id);
+        touched = true;
+    }
     if let Some(complexity) = updates.complexity {
         separated
             .push("complexity = ")
@@ -1973,6 +2395,12 @@ pub async fn update_task<R: Runtime>(
         separated
             .push("last_codex_session_id = ")
             .push_bind_unseparated(last_codex_session_id);
+        touched = true;
+    }
+    if let Some(last_review_session_id) = updates.last_review_session_id {
+        separated
+            .push("last_review_session_id = ")
+            .push_bind_unseparated(last_review_session_id);
         touched = true;
     }
 
@@ -2022,9 +2450,11 @@ pub async fn update_task_status<R: Runtime>(
             status: Some(status),
             priority: None,
             assignee_id: None,
+            reviewer_id: None,
             complexity: None,
             ai_suggestion: None,
             last_codex_session_id: None,
+            last_review_session_id: None,
         },
     )
     .await

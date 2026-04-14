@@ -1,20 +1,23 @@
 import { useEffect, useRef } from "react";
+import type { CodexSessionKind } from "@/lib/types";
 import { useEmployeeStore } from "@/stores/employeeStore";
+import { buildTaskLogKey } from "@/stores/employeeStore";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Eraser } from "lucide-react";
 
 interface CodexTerminalProps {
   employeeId?: string;
   taskId?: string;
+  sessionKind?: CodexSessionKind;
 }
 
-export function CodexTerminal({ employeeId, taskId }: CodexTerminalProps) {
+export function CodexTerminal({ employeeId, taskId, sessionKind = "execution" }: CodexTerminalProps) {
   const codexProcesses = useEmployeeStore((s) => s.codexProcesses);
   const clearCodexOutput = useEmployeeStore((s) => s.clearCodexOutput);
   const clearTaskCodexOutput = useEmployeeStore((s) => s.clearTaskCodexOutput);
   const taskLogs = useEmployeeStore((s) => s.taskLogs);
   const process = employeeId ? codexProcesses[employeeId] : undefined;
-  const output = taskId ? taskLogs[taskId] ?? [] : process?.output ?? [];
+  const output = taskId ? taskLogs[buildTaskLogKey(taskId, sessionKind)] ?? [] : process?.output ?? [];
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -34,7 +37,7 @@ export function CodexTerminal({ employeeId, taskId }: CodexTerminalProps) {
         <button
           onClick={() => {
             if (taskId) {
-              clearTaskCodexOutput(taskId);
+              clearTaskCodexOutput(taskId, sessionKind);
               return;
             }
 

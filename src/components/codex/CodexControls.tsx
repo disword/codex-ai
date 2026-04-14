@@ -165,8 +165,8 @@ export function CodexControls({ employeeId, employeeStatus, model, reasoningEffo
     } catch (e) {
       console.error("Failed to stop codex:", e);
       addCodexOutput(employeeId, `[ERROR] ${String(e)}`);
+      await refreshCodexRuntimeStatus(employeeId);
     }
-    await updateEmployeeStatus(employeeId, "offline");
     setActionLoading(null);
   };
 

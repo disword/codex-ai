@@ -1,11 +1,17 @@
 import { useState, useEffect, useRef } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
-import type { Task, TaskStatus } from "@/lib/types";
+import type { Task, TaskLatestReview, TaskStatus } from "@/lib/types";
 import { TASK_STATUSES, PRIORITIES } from "@/lib/types";
-import { getCodexSettings, healthCheck, openTaskAttachment } from "@/lib/backend";
+import {
+  getCodexSettings,
+  getTaskLatestReview,
+  healthCheck,
+  openTaskAttachment,
+  startTaskCodeReview,
+} from "@/lib/backend";
 import { useTaskStore } from "@/stores/taskStore";
-import { useEmployeeStore } from "@/stores/employeeStore";
+import { buildTaskLogKey, useEmployeeStore } from "@/stores/employeeStore";
 import { useProjectStore } from "@/stores/projectStore";
 import {
   Dialog,
@@ -32,7 +38,8 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Trash2, Sparkles, Loader2, Play, Square, Eraser, ImagePlus } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { Trash2, Sparkles, Loader2, Play, Square, Eraser, ImagePlus, Copy, Wrench } from "lucide-react";
 import {
   aiSuggestAssignee,
   aiAnalyzeComplexity,
@@ -46,8 +53,10 @@ import { SubtaskList } from "./SubtaskList";
 import { CommentList } from "./CommentList";
 import { DeleteTaskDialog } from "./DeleteTaskDialog";
 import { InsertPlanConfirmDialog } from "./InsertPlanConfirmDialog";
+import { ReviewFixConfirmDialog } from "./ReviewFixConfirmDialog";
 import { TaskAttachmentGrid } from "./TaskAttachmentGrid";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
+import { CodexTerminal } from "@/components/codex/CodexTerminal";
 
 const UNASSIGNED_VALUE = "__unassigned__";
 const EMPTY_ATTACHMENTS: never[] = [];
@@ -74,6 +83,7 @@ export function TaskDetailDialog({
     addTaskAttachments,
     deleteTaskAttachment,
     addSubtasks,
+    createTask,
   } = useTaskStore();
   const {
     employees,
@@ -96,6 +106,7 @@ export function TaskDetailDialog({
   const [priority, setPriority] = useState(task.priority);
   const [status, setStatus] = useState(task.status);
   const [assigneeId, setAssigneeId] = useState(task.assignee_id ?? "");
+  const [reviewerId, setReviewerId] = useState(task.reviewer_id ?? "");
   const [aiLoading, setAiLoading] = useState<string | null>(null);
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
@@ -111,14 +122,27 @@ export function TaskDetailDialog({
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const [deletingAttachmentId, setDeletingAttachmentId] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [reviewError, setReviewError] = useState<string | null>(null);
+  const [reviewNotice, setReviewNotice] = useState<string | null>(null);
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewFixDialogOpen, setReviewFixDialogOpen] = useState(false);
+  const [reviewFixSubmitting, setReviewFixSubmitting] = useState(false);
+  const [latestReview, setLatestReview] = useState<TaskLatestReview | null>(null);
+  const [latestReviewLoading, setLatestReviewLoading] = useState(false);
   const terminalRef = useRef<HTMLDivElement>(null);
   const aiLogRef = useRef<HTMLDivElement>(null);
   const [aiLogs, setAiLogs] = useState<string[]>([]);
   const assignee = assigneeId ? employees.find((employee) => employee.id === assigneeId) : undefined;
+  const reviewer = reviewerId ? employees.find((employee) => employee.id === reviewerId) : undefined;
+  const reviewerCandidates = employees.filter((employee) => employee.role === "reviewer");
 
   const codexProcess = assigneeId ? codexProcesses[assigneeId] : undefined;
   const isRunning = (codexProcess?.running ?? false) && codexProcess?.activeTaskId === task.id;
-  const output = taskLogs[task.id] ?? [];
+  const reviewerProcess = reviewerId ? codexProcesses[reviewerId] : undefined;
+  const isReviewRunning =
+    (reviewerProcess?.running ?? false) && reviewerProcess?.activeTaskId === task.id;
+  const output = taskLogs[buildTaskLogKey(task.id, "execution")] ?? [];
+  const reviewOutput = taskLogs[buildTaskLogKey(task.id, "review")] ?? [];
 
   useEffect(() => {
     if (open) {
@@ -129,9 +153,13 @@ export function TaskDetailDialog({
       setPriority(task.priority);
       setStatus(task.status);
       setAssigneeId(task.assignee_id ?? "");
+      setReviewerId(task.reviewer_id ?? "");
       setAiResult(null);
       setAttachmentError(null);
       setSaveError(null);
+      setReviewError(null);
+      setReviewNotice(null);
+      void loadLatestReview();
     }
   }, [fetchAttachments, fetchEmployees, open, task]);
 
@@ -153,6 +181,13 @@ export function TaskDetailDialog({
       setAttachmentLoading(false);
       setDeletingAttachmentId(null);
       setAiLogs([]);
+      setReviewLoading(false);
+      setLatestReview(null);
+      setLatestReviewLoading(false);
+      setReviewError(null);
+      setReviewNotice(null);
+      setReviewFixDialogOpen(false);
+      setReviewFixSubmitting(false);
     }
   }, [open, task.id]);
 
@@ -163,6 +198,24 @@ export function TaskDetailDialog({
   useEffect(() => {
     aiLogRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [aiLogs.length]);
+
+  useEffect(() => {
+    if (!open || !task.last_review_session_id) {
+      return;
+    }
+
+    void loadLatestReview();
+  }, [open, task.last_review_session_id]);
+
+  useEffect(() => {
+    if (!open || reviewOutput.length === 0) {
+      return;
+    }
+
+    if (reviewOutput[reviewOutput.length - 1]?.startsWith("[EXIT]")) {
+      void loadLatestReview();
+    }
+  }, [open, reviewOutput]);
 
   const formatLogTime = () =>
     new Date().toLocaleTimeString("zh-CN", {
@@ -193,6 +246,8 @@ export function TaskDetailDialog({
         await useTaskStore.getState().updateTaskStatus(task.id, value as TaskStatus);
       } else if (field === "assignee_id") {
         await updateTask(task.id, { assignee_id: value || null });
+      } else if (field === "reviewer_id") {
+        await updateTask(task.id, { reviewer_id: value || null });
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -262,6 +317,35 @@ export function TaskDetailDialog({
     return (useTaskStore.getState().attachments[task.id] ?? [])
       .map((attachment) => attachment.stored_path.trim())
       .filter((path) => path.length > 0);
+  };
+
+  const loadLatestReview = async () => {
+    setLatestReviewLoading(true);
+    try {
+      const review = await getTaskLatestReview(task.id);
+      setLatestReview(review);
+    } catch (error) {
+      console.error("Failed to load latest task review:", error);
+      setReviewError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setLatestReviewLoading(false);
+    }
+  };
+
+  const buildReviewFixTaskDescription = (reviewReport: string) => {
+    const sections = [
+      "基于代码审核结果创建的修复任务。",
+      `原任务：${task.title}`,
+      task.description?.trim() ? `原任务描述：\n${task.description.trim()}` : null,
+      latestReview?.session.cli_session_id
+        ? `审核会话：${latestReview.session.cli_session_id}`
+        : latestReview?.session.id
+          ? `审核记录：${latestReview.session.id}`
+          : null,
+      `审核结果：\n${reviewReport.trim()}`,
+    ].filter(Boolean);
+
+    return sections.join("\n\n");
   };
 
   const logOneShotAiContext = async (operation: string, imagePaths: string[]) => {
@@ -335,8 +419,119 @@ export function TaskDetailDialog({
     } catch (err) {
       console.error("Failed to stop codex:", err);
       addCodexOutput(assigneeId, `[ERROR] ${String(err)}`, task.id);
+      await refreshCodexRuntimeStatus(assigneeId);
     } finally {
       setCodexLoading(false);
+    }
+  };
+
+  const handleStartCodeReview = async () => {
+    if (!reviewerId) {
+      setReviewError("请先指定审查员，再执行代码审核。");
+      return;
+    }
+
+    setReviewLoading(true);
+    setReviewError(null);
+    try {
+      await updateEmployeeStatus(reviewerId, "busy");
+      setCodexRunning(reviewerId, true, task.id);
+      clearTaskCodexOutput(task.id, "review");
+      await startTaskCodeReview(task.id);
+      await loadLatestReview();
+    } catch (error) {
+      console.error("Failed to start task code review:", error);
+      setCodexRunning(reviewerId, false, null);
+      addCodexOutput(reviewerId, `[ERROR] ${String(error)}`, task.id, "review");
+      setReviewError(error instanceof Error ? error.message : String(error));
+      await refreshCodexRuntimeStatus(reviewerId);
+    } finally {
+      setReviewLoading(false);
+    }
+  };
+
+  const handleCopyReviewReport = async () => {
+    if (!latestReview?.report?.trim()) {
+      setReviewError("当前没有可复制的审核结果。");
+      return;
+    }
+
+    try {
+      if (!navigator.clipboard?.writeText) {
+        throw new Error("当前环境不支持剪贴板写入");
+      }
+
+      await navigator.clipboard.writeText(latestReview.report);
+      setReviewError(null);
+      setReviewNotice("审核结果已复制到剪贴板。");
+    } catch (error) {
+      setReviewNotice(null);
+      setReviewError(error instanceof Error ? error.message : String(error));
+    }
+  };
+
+  const handleConfirmReviewFix = async () => {
+    const reviewReport = latestReview?.report?.trim();
+    if (!reviewReport) {
+      setReviewError("请先生成审核结果，再创建修复任务。");
+      return;
+    }
+    if (!assigneeId) {
+      setReviewError("原任务未指派开发负责人，无法创建并运行修复任务。");
+      return;
+    }
+    if (!projectRepoPath) {
+      setReviewError("当前项目未配置仓库路径，无法立即运行修复任务。");
+      return;
+    }
+    if (codexProcesses[assigneeId]?.running) {
+      setReviewError("当前开发负责人仍有运行中的 Codex 会话，请先停止后再创建修复任务。");
+      return;
+    }
+
+    const fixTaskTitle = `修复：${task.title}`.slice(0, 120);
+    const fixTaskDescription = buildReviewFixTaskDescription(reviewReport);
+
+    setReviewFixSubmitting(true);
+    setReviewError(null);
+    setReviewNotice(null);
+    try {
+      const createdTask = await createTask({
+        title: fixTaskTitle,
+        description: fixTaskDescription,
+        priority,
+        project_id: task.project_id,
+        assignee_id: assigneeId,
+      });
+
+      await updateEmployeeStatus(assigneeId, "busy");
+      await updateTaskStatus(createdTask.id, "in_progress");
+      setCodexRunning(assigneeId, true, createdTask.id);
+      clearCodexOutput(assigneeId);
+      clearTaskCodexOutput(createdTask.id, "execution");
+      const executionInput = buildTaskExecutionInput({
+        title: createdTask.title,
+        description: createdTask.description,
+      });
+      await startCodex(assigneeId, executionInput.prompt, {
+        model: assignee?.model,
+        reasoningEffort: assignee?.reasoning_effort,
+        systemPrompt: assignee?.system_prompt,
+        workingDir: projectRepoPath,
+        taskId: createdTask.id,
+        imagePaths: executionInput.imagePaths,
+      });
+
+      setReviewFixDialogOpen(false);
+      setReviewNotice(`已创建修复任务“${createdTask.title}”，并开始运行。`);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setReviewError(message);
+      addCodexOutput(assigneeId, `[ERROR] ${message}`);
+      setCodexRunning(assigneeId, false, null);
+      await refreshCodexRuntimeStatus(assigneeId);
+    } finally {
+      setReviewFixSubmitting(false);
     }
   };
 
@@ -559,6 +754,23 @@ export function TaskDetailDialog({
     return "text-zinc-300";
   }
 
+  function getReviewSessionStatusLabel(statusValue: string | null | undefined) {
+    switch (statusValue) {
+      case "pending":
+        return "准备中";
+      case "running":
+        return "运行中";
+      case "stopping":
+        return "停止中";
+      case "exited":
+        return "已完成";
+      case "failed":
+        return "失败";
+      default:
+        return "未开始";
+    }
+  }
+
   const aiActionDisabled = aiLoading !== null || planLoading || insertSubmitting;
 
   return (
@@ -684,6 +896,39 @@ export function TaskDetailDialog({
                 </Select>
               </div>
 
+              <div className="flex shrink-0 items-center gap-2">
+                <span className="shrink-0 whitespace-nowrap text-xs text-muted-foreground">审查员</span>
+                <Select
+                  value={reviewerId || UNASSIGNED_VALUE}
+                  onValueChange={(value) => {
+                    const nextValue =
+                      !value || value === UNASSIGNED_VALUE ? "" : value;
+                    setReviewerId(nextValue);
+                    void handleSave("reviewer_id", nextValue);
+                  }}
+                >
+                  <SelectTrigger className="h-7 w-[176px] shrink-0 rounded-md px-2 text-xs">
+                    <SelectValue>
+                      {(value) => {
+                        if (!value || value === UNASSIGNED_VALUE) {
+                          return "未指定";
+                        }
+
+                        return employees.find((emp) => emp.id === value)?.name ?? "未指定";
+                      }}
+                    </SelectValue>
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={UNASSIGNED_VALUE}>未指定</SelectItem>
+                    {reviewerCandidates.map((emp) => (
+                      <SelectItem key={emp.id} value={emp.id}>
+                        {emp.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              </div>
+
               {/* Delete */}
               <button
                 onClick={() => setDeleteDialogOpen(true)}
@@ -757,6 +1002,146 @@ export function TaskDetailDialog({
               </ScrollArea>
             </div>
           )}
+
+          <div className="space-y-3 rounded-md border border-border/70 bg-muted/20 p-3">
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="space-y-1">
+                <p className="text-sm font-medium">代码审核</p>
+                <p className="text-[11px] text-muted-foreground">
+                  审核当前项目仓库的工作区改动，默认由任务审查员发起只读 reviewer 会话。
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => void handleStartCodeReview()}
+                disabled={reviewLoading || status !== "review" || !reviewerId}
+                className="flex items-center gap-1 rounded-md bg-amber-500 px-2.5 py-1.5 text-xs font-medium text-black transition-colors hover:bg-amber-400 disabled:opacity-50"
+                title={
+                  status !== "review"
+                    ? "仅“审核中”任务支持代码审核"
+                    : !reviewerId
+                      ? "请先指定审查员"
+                      : "启动代码审核"
+                }
+              >
+                {reviewLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Play className="h-3.5 w-3.5" />}
+                审核代码
+              </button>
+            </div>
+
+            {reviewError && (
+              <div className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                {reviewError}
+              </div>
+            )}
+
+            {reviewNotice && (
+              <div className="rounded-md border border-green-500/30 bg-green-500/10 px-3 py-2 text-xs text-green-700">
+                {reviewNotice}
+              </div>
+            )}
+
+            <div className="grid gap-2 text-xs text-muted-foreground md:grid-cols-3">
+              <div className="rounded-md border border-border bg-background/70 px-3 py-2">
+                <span className="font-medium text-foreground">审查员：</span>
+                {reviewer?.name ?? "未指定"}
+              </div>
+              <div className="rounded-md border border-border bg-background/70 px-3 py-2">
+                <span className="font-medium text-foreground">最近状态：</span>
+                {getReviewSessionStatusLabel(
+                  isReviewRunning ? "running" : latestReview?.session.status,
+                )}
+              </div>
+              <div className="rounded-md border border-border bg-background/70 px-3 py-2">
+                <span className="font-medium text-foreground">最近会话：</span>
+                {latestReview?.session.cli_session_id ?? latestReview?.session.id ?? "暂无"}
+              </div>
+            </div>
+
+            {status !== "review" && (
+              <div className="rounded-md border border-border bg-background/70 px-3 py-2 text-xs text-muted-foreground">
+                当前任务状态不是“审核中”，代码审核入口已禁用。
+              </div>
+            )}
+
+            {(isReviewRunning || reviewOutput.length > 0) && reviewerId && (
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <p className="text-xs font-medium text-muted-foreground">审核会话日志</p>
+                  <span className="text-[11px] text-muted-foreground">
+                    {isReviewRunning ? "运行中" : "最近一次审核输出"}
+                  </span>
+                </div>
+                <CodexTerminal taskId={task.id} sessionKind="review" />
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <p className="text-xs font-medium text-muted-foreground">审核结果</p>
+                <div className="flex items-center gap-2">
+                  {latestReviewLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => void loadLatestReview()}
+                      className="text-[11px] text-primary hover:underline"
+                    >
+                      刷新
+                    </button>
+                  )}
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="xs"
+                    onClick={() => void handleCopyReviewReport()}
+                    disabled={!latestReview?.report?.trim()}
+                  >
+                    <Copy className="h-3 w-3" />
+                    复制
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="xs"
+                    onClick={() => setReviewFixDialogOpen(true)}
+                    disabled={!latestReview?.report?.trim() || !assigneeId || reviewFixSubmitting}
+                    title={
+                      !assigneeId
+                        ? "原任务未指派开发负责人"
+                        : "创建修复任务并立即运行"
+                    }
+                  >
+                    <Wrench className="h-3 w-3" />
+                    修复
+                  </Button>
+                </div>
+              </div>
+
+              {latestReview?.report ? (
+                <ScrollArea className="h-56 overflow-hidden rounded-md border bg-background/80">
+                  <div className="p-3 text-xs whitespace-pre-wrap text-foreground">
+                    {latestReview.report}
+                  </div>
+                </ScrollArea>
+              ) : (
+                <div className="rounded-md border border-dashed border-border bg-background/70 px-3 py-6 text-center text-xs text-muted-foreground">
+                  {latestReview
+                    ? "最近一次审核尚未产出结构化报告。"
+                    : "还没有代码审核结果。"}
+                </div>
+              )}
+
+              {latestReview && (
+                <div className="text-[11px] text-muted-foreground">
+                  {latestReview.reviewer_name ?? "未知审查员"} ·
+                  {" "}
+                  {new Date(latestReview.session.started_at).toLocaleString("zh-CN")}
+                </div>
+              )}
+            </div>
+          </div>
 
           {/* AI Actions */}
           <div className="flex flex-wrap items-center gap-2">
@@ -1010,6 +1395,16 @@ export function TaskDetailDialog({
           onOpenChange={setInsertDialogOpen}
           onAppend={() => applyGeneratedPlan("append")}
           onReplace={() => applyGeneratedPlan("replace")}
+        />
+      )}
+      {reviewFixDialogOpen && assignee && (
+        <ReviewFixConfirmDialog
+          open={reviewFixDialogOpen}
+          sourceTaskTitle={task.title}
+          assigneeName={assignee.name}
+          creating={reviewFixSubmitting}
+          onOpenChange={setReviewFixDialogOpen}
+          onConfirm={handleConfirmReviewFix}
         />
       )}
     </>

@@ -316,6 +316,25 @@ pub fn get_all_migrations() -> Vec<Migration> {
             "#,
             kind: tauri_plugin_sql::MigrationKind::Up,
         },
+        Migration {
+            version: 18,
+            description: "add review session and reviewer fields",
+            sql: r#"
+                ALTER TABLE tasks ADD COLUMN reviewer_id TEXT REFERENCES employees(id);
+                ALTER TABLE tasks ADD COLUMN last_review_session_id TEXT;
+                ALTER TABLE codex_sessions ADD COLUMN session_kind TEXT NOT NULL DEFAULT 'execution';
+
+                UPDATE codex_sessions
+                SET session_kind = 'execution'
+                WHERE session_kind IS NULL
+                   OR session_kind NOT IN ('execution', 'review');
+
+                CREATE INDEX idx_tasks_reviewer ON tasks(reviewer_id);
+                CREATE INDEX idx_codex_sessions_task_kind_started
+                    ON codex_sessions(task_id, session_kind, started_at DESC);
+            "#,
+            kind: tauri_plugin_sql::MigrationKind::Up,
+        },
     ]
 }
 

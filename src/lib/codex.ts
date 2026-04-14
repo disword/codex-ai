@@ -1,21 +1,28 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import type { CodexSessionKind } from "./types";
 
 export interface CodexOutput {
   employee_id: string;
   task_id: string | null;
+  session_kind: CodexSessionKind;
+  session_record_id: string;
   line: string;
 }
 
 export interface CodexExit {
   employee_id: string;
   task_id: string | null;
+  session_kind: CodexSessionKind;
+  session_record_id: string;
   code: number | null;
 }
 
 export interface CodexSession {
   employee_id: string;
   task_id: string | null;
+  session_kind: CodexSessionKind;
+  session_record_id: string;
   session_id: string;
 }
 

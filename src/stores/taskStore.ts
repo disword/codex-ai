@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { select } from "@/lib/database";
-import type { Task, TaskAttachment, Subtask, Comment, TaskStatus } from "@/lib/types";
+import type { CodexSessionKind, Task, TaskAttachment, Subtask, Comment, TaskStatus } from "@/lib/types";
 import { onCodexSession, type CodexSession } from "@/lib/codex";
 import {
   addTaskAttachments as addTaskAttachmentsCommand,
@@ -40,9 +40,9 @@ interface TaskStore {
       attachment_source_paths?: string[];
     },
     options?: { refreshProjectId?: string },
-  ) => Promise<void>;
+  ) => Promise<Task>;
   updateTaskStatus: (id: string, status: TaskStatus) => Promise<void>;
-  updateTask: (id: string, updates: Partial<Pick<Task, "title" | "description" | "priority" | "status" | "assignee_id" | "complexity" | "ai_suggestion" | "last_codex_session_id">>) => Promise<void>;
+  updateTask: (id: string, updates: Partial<Pick<Task, "title" | "description" | "priority" | "status" | "assignee_id" | "reviewer_id" | "complexity" | "ai_suggestion" | "last_codex_session_id" | "last_review_session_id">>) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
   addTaskAttachments: (taskId: string, sourcePaths: string[]) => Promise<void>;
   deleteTaskAttachment: (taskId: string, attachmentId: string) => Promise<void>;
@@ -52,7 +52,7 @@ interface TaskStore {
   deleteSubtask: (subtaskId: string) => Promise<void>;
   addComment: (taskId: string, content: string, employeeId?: string, isAiGenerated?: boolean) => Promise<void>;
   moveTask: (taskId: string, newStatus: TaskStatus) => void;
-  setTaskLastSessionId: (taskId: string, sessionId: string) => Promise<void>;
+  setTaskLastSessionId: (taskId: string, sessionId: string, sessionKind: CodexSessionKind) => Promise<void>;
   initCodexSessionListeners: () => () => void;
 }
 
@@ -106,13 +106,14 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
   },
 
   createTask: async (data, options) => {
-    await createTaskCommand({
+    const task = await createTaskCommand({
       ...data,
       description: data.description ?? null,
       assignee_id: data.assignee_id ?? null,
       attachment_source_paths: data.attachment_source_paths ?? [],
     });
     await get().fetchTasks(options?.refreshProjectId ?? get().activeProjectId);
+    return task;
   },
 
   updateTaskStatus: async (id, status) => {
@@ -129,14 +130,23 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
     }));
   },
 
-  setTaskLastSessionId: async (taskId, sessionId) => {
+  setTaskLastSessionId: async (taskId, sessionId, sessionKind) => {
     set((state) => ({
       tasks: state.tasks.map((task) => (
-        task.id === taskId ? { ...task, last_codex_session_id: sessionId } : task
+        task.id === taskId
+          ? sessionKind === "review"
+            ? { ...task, last_review_session_id: sessionId }
+            : { ...task, last_codex_session_id: sessionId }
+          : task
       )),
     }));
     try {
-      const task = await updateTaskCommand(taskId, { last_codex_session_id: sessionId });
+      const task = await updateTaskCommand(
+        taskId,
+        sessionKind === "review"
+          ? { last_review_session_id: sessionId }
+          : { last_codex_session_id: sessionId },
+      );
       set((state) => ({
         tasks: state.tasks.map((current) => (current.id === taskId ? task : current)),
       }));
@@ -245,7 +255,11 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
       codexSessionListenersInitPromise = Promise.all([
         onCodexSession((session: CodexSession) => {
           if (session.task_id) {
-            void get().setTaskLastSessionId(session.task_id, session.session_id);
+            void get().setTaskLastSessionId(
+              session.task_id,
+              session.session_id,
+              session.session_kind,
+            );
           }
         }),
       ])

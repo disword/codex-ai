@@ -48,9 +48,11 @@ pub struct Task {
     pub priority: String,
     pub project_id: String,
     pub assignee_id: Option<String>,
+    pub reviewer_id: Option<String>,
     pub complexity: Option<i32>,
     pub ai_suggestion: Option<String>,
     pub last_codex_session_id: Option<String>,
+    pub last_review_session_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -127,6 +129,7 @@ pub struct CodexSessionRecord {
     pub project_id: Option<String>,
     pub cli_session_id: Option<String>,
     pub working_dir: Option<String>,
+    pub session_kind: String,
     pub status: String,
     pub started_at: String,
     pub ended_at: Option<String>,
@@ -212,6 +215,13 @@ pub struct DatabaseRestoreResult {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TaskLatestReview {
+    pub session: CodexSessionRecord,
+    pub report: Option<String>,
+    pub reviewer_name: Option<String>,
+}
+
 // ========== DTOs ==========
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -277,11 +287,15 @@ pub struct UpdateTask {
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub assignee_id: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub reviewer_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub complexity: Option<Option<i32>>,
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub ai_suggestion: Option<Option<String>>,
     #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
     pub last_codex_session_id: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_explicit_nullable")]
+    pub last_review_session_id: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -314,6 +328,8 @@ pub struct CreateComment {
 pub struct CodexOutput {
     pub employee_id: String,
     pub task_id: Option<String>,
+    pub session_kind: String,
+    pub session_record_id: String,
     pub line: String,
 }
 
@@ -321,6 +337,8 @@ pub struct CodexOutput {
 pub struct CodexExit {
     pub employee_id: String,
     pub task_id: Option<String>,
+    pub session_kind: String,
+    pub session_record_id: String,
     pub code: Option<i32>,
 }
 
@@ -328,6 +346,8 @@ pub struct CodexExit {
 pub struct CodexSession {
     pub employee_id: String,
     pub task_id: Option<String>,
+    pub session_kind: String,
+    pub session_record_id: String,
     pub session_id: String,
 }
 
@@ -366,6 +386,20 @@ mod tests {
         assert_eq!(payload.description, Some(None));
         assert_eq!(payload.assignee_id, Some(None));
         assert_eq!(payload.complexity, Some(Some(3)));
+    }
+
+    #[test]
+    fn task_update_keeps_review_fields() {
+        let payload: UpdateTask = serde_json::from_str(
+            r#"{"reviewer_id":null,"last_review_session_id":"review-session-1"}"#,
+        )
+        .expect("deserialize task review update");
+
+        assert_eq!(payload.reviewer_id, Some(None));
+        assert_eq!(
+            payload.last_review_session_id,
+            Some(Some("review-session-1".to_string()))
+        );
     }
 
     #[test]

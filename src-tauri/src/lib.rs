@@ -41,6 +41,8 @@ pub fn run() {
             app::backup_database,
             app::restore_database,
             app::get_codex_session_status,
+            app::get_task_latest_review,
+            app::start_task_code_review,
             app::read_image_file,
             app::open_task_attachment,
             app::create_project,

@@ -26,6 +26,10 @@ use crate::db::models::{CodexExit, CodexOutput, CodexSession};
 const SUPPORTED_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"];
 const SUPPORTED_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
 const SESSION_ID_PREFIX: &str = "session id:";
+const REVIEW_REPORT_START_TAG: &str = "<review_report>";
+const REVIEW_REPORT_END_TAG: &str = "</review_report>";
+const STOP_WAIT_POLL_MS: u64 = 50;
+const STOP_WAIT_MAX_ATTEMPTS: usize = 600;
 
 #[derive(Debug, Deserialize)]
 struct AiSubtasksPayload {
@@ -51,6 +55,41 @@ impl CodexExecutionProvider {
             CodexExecutionProvider::Cli => "CLI",
             CodexExecutionProvider::Sdk => "SDK",
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodexSessionKind {
+    Execution,
+    Review,
+}
+
+impl CodexSessionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CodexSessionKind::Execution => "execution",
+            CodexSessionKind::Review => "review",
+        }
+    }
+
+    fn activity_start_action(self, resumed: bool) -> &'static str {
+        match self {
+            CodexSessionKind::Execution => {
+                if resumed {
+                    "task_execution_resumed"
+                } else {
+                    "task_execution_started"
+                }
+            }
+            CodexSessionKind::Review => "task_review_started",
+        }
+    }
+}
+
+fn normalize_session_kind(session_kind: Option<&str>) -> CodexSessionKind {
+    match session_kind {
+        Some("review") => CodexSessionKind::Review,
+        _ => CodexSessionKind::Execution,
     }
 }
 
@@ -93,6 +132,22 @@ fn extract_session_id_from_output(line: &str) -> Option<String> {
         .split_once(':')
         .map(|(_, value)| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn extract_tagged_block(raw: &str, start_tag: &str, end_tag: &str) -> Option<String> {
+    let start = raw.find(start_tag)?;
+    let content_start = start + start_tag.len();
+    let rest = &raw[content_start..];
+    let end = rest.find(end_tag)?;
+    let content = rest[..end].trim();
+    (!content.is_empty()).then(|| content.to_string())
+}
+
+fn extract_review_report(raw: &str) -> Option<String> {
+    extract_tagged_block(raw, REVIEW_REPORT_START_TAG, REVIEW_REPORT_END_TAG).or_else(|| {
+        let trimmed = raw.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    })
 }
 
 fn compose_codex_prompt(task_description: &str, system_prompt: Option<&str>) -> String {
@@ -193,12 +248,28 @@ fn build_sdk_input_items(prompt: &str, image_paths: &[String]) -> Vec<serde_json
     items
 }
 
+#[cfg(unix)]
+fn configure_process_group(command: &mut tokio::process::Command) {
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setpgid(0, 0) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn configure_process_group(_command: &mut tokio::process::Command) {}
+
 async fn record_failed_session(
     app: &AppHandle,
     employee_id: &str,
     task_id: Option<&str>,
     working_dir: Option<&str>,
     resume_session_id: Option<&str>,
+    session_kind: CodexSessionKind,
     message: &str,
 ) {
     if let Ok(record) = insert_codex_session_record(
@@ -207,6 +278,7 @@ async fn record_failed_session(
         task_id,
         working_dir,
         resume_session_id,
+        session_kind.as_str(),
         "failed",
     )
     .await
@@ -224,6 +296,7 @@ async fn bind_cli_session_id(
     employee_id: &str,
     task_id: Option<&String>,
     session_record_id: &str,
+    session_kind: CodexSessionKind,
     cli_session_id: String,
 ) {
     let _ = update_codex_session_record(
@@ -249,6 +322,8 @@ async fn bind_cli_session_id(
         CodexSession {
             employee_id: employee_id.to_string(),
             task_id: task_id.cloned(),
+            session_kind: session_kind.as_str().to_string(),
+            session_record_id: session_record_id.to_string(),
             session_id: cli_session_id,
         },
     );
@@ -272,12 +347,13 @@ async fn fetch_task_activity_context(
     })
 }
 
-async fn write_task_execution_activity(
+async fn write_task_session_activity(
     app: &AppHandle,
     pool: &sqlx::SqlitePool,
     session_record_id: &str,
     employee_id: &str,
     task_id: Option<&str>,
+    session_kind: CodexSessionKind,
     resume_session_id: Option<&str>,
 ) {
     let Some(task_id) = task_id else {
@@ -286,11 +362,7 @@ async fn write_task_execution_activity(
 
     let result = async {
         let (task_title, project_id) = fetch_task_activity_context(pool, task_id).await?;
-        let action = if resume_session_id.is_some() {
-            "task_execution_resumed"
-        } else {
-            "task_execution_started"
-        };
+        let action = session_kind.activity_start_action(resume_session_id.is_some());
 
         insert_activity_log(
             pool,
@@ -317,31 +389,140 @@ async fn write_task_execution_activity(
             CodexOutput {
                 employee_id: employee_id.to_string(),
                 task_id: Some(task_id.to_string()),
+                session_kind: session_kind.as_str().to_string(),
+                session_record_id: session_record_id.to_string(),
                 line: format!("[WARN] 活动日志写入失败: {}", error),
             },
         );
     }
 }
 
+async fn finalize_stale_process_slot(
+    app: &AppHandle,
+    session_record_id: &str,
+    exit_code: Option<i32>,
+    error_message: Option<&str>,
+) {
+    let current = fetch_codex_session_by_id(app, session_record_id).await.ok();
+    let Some(current) = current else {
+        return;
+    };
+
+    if matches!(current.status.as_str(), "exited" | "failed") {
+        return;
+    }
+
+    let final_status = if current.status == "stopping" {
+        "exited"
+    } else if exit_code == Some(0) && error_message.is_none() {
+        "exited"
+    } else {
+        "failed"
+    };
+    let ended_at = now_sqlite();
+    let _ = update_codex_session_record(
+        app,
+        session_record_id,
+        Some(final_status),
+        None,
+        Some(exit_code),
+        Some(Some(ended_at.as_str())),
+    )
+    .await;
+
+    if let Ok(pool) = sqlite_pool(app).await {
+        let event_type = if final_status == "exited" {
+            "session_exited"
+        } else {
+            "session_failed"
+        };
+        let message = error_message
+            .map(|message| format!("检测到残留进程槽位并已回收: {}", message))
+            .unwrap_or_else(|| {
+                format!(
+                    "检测到已退出进程并已回收，exit_code={}",
+                    exit_code.unwrap_or_default()
+                )
+            });
+        let _ =
+            insert_codex_session_event(&pool, session_record_id, event_type, Some(&message)).await;
+    }
+}
+
+async fn get_live_managed_process(
+    app: &AppHandle,
+    state: &State<'_, Arc<Mutex<CodexManager>>>,
+    employee_id: &str,
+) -> Result<Option<crate::codex::manager::ManagedCodexProcess>, String> {
+    let process = {
+        let manager = state.lock().map_err(|error| error.to_string())?;
+        manager.get_process(employee_id)
+    };
+
+    let Some(process) = process else {
+        return Ok(None);
+    };
+
+    let status = {
+        let mut child = process.child.lock().await;
+        child.try_wait()
+    };
+
+    match status {
+        Ok(None) => Ok(Some(process)),
+        Ok(Some(exit_code)) => {
+            finalize_stale_process_slot(app, &process.session_record_id, Some(exit_code), None)
+                .await;
+            let mut manager = state.lock().map_err(|error| error.to_string())?;
+            manager.remove_process(employee_id);
+            Ok(None)
+        }
+        Err(error) => {
+            finalize_stale_process_slot(
+                app,
+                &process.session_record_id,
+                None,
+                Some(error.as_str()),
+            )
+            .await;
+            let mut manager = state.lock().map_err(|error| error.to_string())?;
+            manager.remove_process(employee_id);
+            Ok(None)
+        }
+    }
+}
+
 async fn wait_until_process_stops(
+    app: &AppHandle,
     state: &State<'_, Arc<Mutex<CodexManager>>>,
     employee_id: &str,
 ) -> Result<(), String> {
-    for _ in 0..100 {
-        let still_running = {
-            let manager = state.lock().map_err(|error| error.to_string())?;
-            manager.is_running(employee_id)
-        };
-        if !still_running {
+    for _ in 0..STOP_WAIT_MAX_ATTEMPTS {
+        if get_live_managed_process(app, state, employee_id)
+            .await?
+            .is_none()
+        {
             return Ok(());
         }
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(STOP_WAIT_POLL_MS)).await;
     }
 
-    Err(format!(
-        "Timed out waiting for employee {} process to stop",
-        employee_id
-    ))
+    let process = {
+        let mut manager = state.lock().map_err(|error| error.to_string())?;
+        manager.remove_process(employee_id)
+    };
+
+    if let Some(process) = process {
+        finalize_stale_process_slot(
+            app,
+            &process.session_record_id,
+            None,
+            Some("停止等待超时，已强制回收运行槽位"),
+        )
+        .await;
+    }
+
+    Ok(())
 }
 
 pub struct CodexChild {
@@ -349,10 +530,37 @@ pub struct CodexChild {
 }
 
 impl CodexChild {
-    pub fn start_kill(&mut self) -> Result<(), String> {
-        self.child
-            .start_kill()
-            .map_err(|e: std::io::Error| e.to_string())
+    #[cfg(unix)]
+    pub fn kill_process_group(&mut self) -> Result<(), String> {
+        let Some(pid) = self.child.id() else {
+            return Ok(());
+        };
+
+        let result = unsafe { libc::killpg(pid as i32, libc::SIGKILL) };
+        if result == 0 {
+            Ok(())
+        } else {
+            let error = std::io::Error::last_os_error();
+            match error.raw_os_error() {
+                Some(libc::ESRCH) => Ok(()),
+                _ => Err(error.to_string()),
+            }
+        }
+    }
+
+    #[cfg(not(unix))]
+    pub fn kill_process_group(&mut self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub async fn kill(&mut self) -> Result<(), String> {
+        match self.child.kill().await {
+            Ok(()) => Ok(()),
+            Err(error) => match error.raw_os_error() {
+                Some(libc::ESRCH) => Ok(()),
+                _ => Err(error.to_string()),
+            },
+        }
     }
 
     pub fn try_wait(&mut self) -> Result<Option<i32>, String> {
@@ -376,13 +584,16 @@ pub async fn start_codex(
     task_id: Option<String>,
     resume_session_id: Option<String>,
     image_paths: Option<Vec<String>>,
+    session_kind: Option<String>,
 ) -> Result<(), String> {
+    let session_kind = normalize_session_kind(session_kind.as_deref());
+
     // Check if already running
+    if get_live_managed_process(&app, &state, &employee_id)
+        .await?
+        .is_some()
     {
-        let manager = state.lock().map_err(|e| e.to_string())?;
-        if manager.is_running(&employee_id) {
-            return Err(format!("员工{}的Codex实例已在运行", employee_id));
-        }
+        return Err(format!("员工{}的Codex实例已在运行", employee_id));
     }
 
     let run_cwd = match validate_runtime_working_dir(working_dir.as_deref()) {
@@ -394,6 +605,7 @@ pub async fn start_codex(
                 task_id.as_deref(),
                 working_dir.as_deref(),
                 resume_session_id.as_deref(),
+                session_kind,
                 &error,
             )
             .await;
@@ -407,6 +619,7 @@ pub async fn start_codex(
         task_id.as_deref(),
         Some(&run_cwd),
         resume_session_id.as_deref(),
+        session_kind.as_str(),
         "pending",
     )
     .await?;
@@ -499,6 +712,8 @@ pub async fn start_codex(
         }
     };
 
+    configure_process_group(&mut cmd);
+
     if provider == CodexExecutionProvider::Cli {
         cmd.arg("exec");
         cmd.arg("--model").arg(model);
@@ -528,6 +743,8 @@ pub async fn start_codex(
             CodexOutput {
                 employee_id: employee_id.clone(),
                 task_id: task_id.clone(),
+                session_kind: session_kind.as_str().to_string(),
+                session_record_id: session_record.id.clone(),
                 line: format!("[WARN] 附件图片不存在，已跳过: {}", missing_path),
             },
         );
@@ -538,6 +755,8 @@ pub async fn start_codex(
         CodexOutput {
             employee_id: employee_id.clone(),
             task_id: task_id.clone(),
+            session_kind: session_kind.as_str().to_string(),
+            session_record_id: session_record.id.clone(),
             line: format_session_prompt_log(
                 provider,
                 model,
@@ -616,12 +835,13 @@ pub async fn start_codex(
         )),
     )
     .await?;
-    write_task_execution_activity(
+    write_task_session_activity(
         &app,
         &pool,
         &session_record.id,
         &employee_id,
         task_id.as_deref(),
+        session_kind,
         resume_session_id.as_deref(),
     )
     .await;
@@ -635,6 +855,7 @@ pub async fn start_codex(
             &employee_id,
             task_id.as_ref(),
             &session_record.id,
+            session_kind,
             session_id,
         )
         .await;
@@ -657,6 +878,7 @@ pub async fn start_codex(
                         &eid,
                         task_id_clone.as_ref(),
                         &session_record_id,
+                        session_kind,
                         session_id,
                     )
                     .await;
@@ -668,6 +890,8 @@ pub async fn start_codex(
     // Use a shared dedup set: codex exec writes the same lines to both
     // stdout and stderr. We track recently emitted lines and skip duplicates.
     let seen = Arc::new(Mutex::new(std::collections::HashSet::<String>::new()));
+    let captured_output = (session_kind == CodexSessionKind::Review)
+        .then(|| Arc::new(Mutex::new(Vec::<String>::new())));
 
     // Read stdout — emit only unseen lines
     let app_clone = app.clone();
@@ -676,6 +900,7 @@ pub async fn start_codex(
     let seen_stdout = seen.clone();
     let session_emitted_clone = session_emitted.clone();
     let session_record_id = session_record.id.clone();
+    let captured_stdout = captured_output.clone();
     tauri::async_runtime::spawn(async move {
         let reader = BufReader::new(stdout);
         let mut lines = reader.lines();
@@ -688,6 +913,7 @@ pub async fn start_codex(
                             &eid,
                             task_id_for_stdout.as_ref(),
                             &session_record_id,
+                            session_kind,
                             session_id,
                         )
                         .await;
@@ -709,11 +935,23 @@ pub async fn start_codex(
                 }
             };
             if !is_dup {
+                if let Some(captured_stdout) = captured_stdout.as_ref() {
+                    let mut captured = captured_stdout.lock().unwrap();
+                    captured.push(line.clone());
+                    if captured.len() > 2000 {
+                        let drain_to = captured.len().saturating_sub(2000);
+                        if drain_to > 0 {
+                            captured.drain(0..drain_to);
+                        }
+                    }
+                }
                 let _ = app_clone.emit(
                     "codex-stdout",
                     CodexOutput {
                         employee_id: eid.clone(),
                         task_id: task_id_for_stdout.clone(),
+                        session_kind: session_kind.as_str().to_string(),
+                        session_record_id: session_record_id.clone(),
                         line,
                     },
                 );
@@ -726,6 +964,8 @@ pub async fn start_codex(
     let eid = employee_id.clone();
     let task_id_for_stderr = task_id.clone();
     let seen_stderr = seen.clone();
+    let session_record_id_for_stderr = session_record.id.clone();
+    let captured_stderr = captured_output.clone();
     tauri::async_runtime::spawn(async move {
         let reader = BufReader::new(stderr);
         let mut lines = reader.lines();
@@ -743,11 +983,23 @@ pub async fn start_codex(
                 }
             };
             if !is_dup {
+                if let Some(captured_stderr) = captured_stderr.as_ref() {
+                    let mut captured = captured_stderr.lock().unwrap();
+                    captured.push(line.clone());
+                    if captured.len() > 2000 {
+                        let drain_to = captured.len().saturating_sub(2000);
+                        if drain_to > 0 {
+                            captured.drain(0..drain_to);
+                        }
+                    }
+                }
                 let _ = app_clone.emit(
                     "codex-stdout",
                     CodexOutput {
                         employee_id: eid.clone(),
                         task_id: task_id_for_stderr.clone(),
+                        session_kind: session_kind.as_str().to_string(),
+                        session_record_id: session_record_id_for_stderr.clone(),
                         line,
                     },
                 );
@@ -765,6 +1017,7 @@ pub async fn start_codex(
     let child_handle_clone = child_handle.clone();
     let provider_for_exit = provider;
     let session_lookup_started_at = session_lookup_started_at;
+    let captured_output_for_exit = captured_output.clone();
     tauri::async_runtime::spawn(async move {
         let exit_code = loop {
             let maybe_status = {
@@ -804,6 +1057,8 @@ pub async fn start_codex(
                         CodexExit {
                             employee_id: eid.clone(),
                             task_id: task_id_clone.clone(),
+                            session_kind: session_kind.as_str().to_string(),
+                            session_record_id: session_record_id.clone(),
                             code: None,
                         },
                     );
@@ -830,6 +1085,7 @@ pub async fn start_codex(
                     &eid,
                     task_id_clone.as_ref(),
                     &session_record_id,
+                    session_kind,
                     session_id,
                 )
                 .await;
@@ -863,6 +1119,64 @@ pub async fn start_codex(
             let _ =
                 insert_codex_session_event(&pool, &session_record_id, event_type, Some(&message))
                     .await;
+            if session_kind == CodexSessionKind::Review {
+                let raw_output = captured_output_for_exit
+                    .as_ref()
+                    .map(|captured| captured.lock().unwrap().join("\n"))
+                    .unwrap_or_default();
+                let report = extract_review_report(&raw_output);
+                if let Some(report) = report.as_ref() {
+                    let _ = insert_codex_session_event(
+                        &pool,
+                        &session_record_id,
+                        "review_report",
+                        Some(report),
+                    )
+                    .await;
+                }
+                if let Some(task_id) = task_id_clone.as_deref() {
+                    let detail = match report.as_ref() {
+                        Some(report) => {
+                            let preview = report
+                                .lines()
+                                .take(3)
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                                .trim()
+                                .to_string();
+                            if preview.is_empty() {
+                                "代码审核完成".to_string()
+                            } else {
+                                preview
+                            }
+                        }
+                        None if final_status == "exited" => {
+                            "代码审核完成，但未提取到结构化报告".to_string()
+                        }
+                        None => {
+                            format!("代码审核失败，exit_code={}", exit_code.unwrap_or_default())
+                        }
+                    };
+                    let action = if final_status == "exited" {
+                        "task_review_completed"
+                    } else {
+                        "task_review_failed"
+                    };
+                    let project_id = fetch_task_activity_context(&pool, task_id)
+                        .await
+                        .ok()
+                        .map(|(_, project_id)| project_id);
+                    let _ = insert_activity_log(
+                        &pool,
+                        action,
+                        &detail,
+                        Some(&eid),
+                        Some(task_id),
+                        project_id.as_deref(),
+                    )
+                    .await;
+                }
+            }
         }
 
         let _ = app_clone.emit(
@@ -870,6 +1184,8 @@ pub async fn start_codex(
             CodexExit {
                 employee_id: eid,
                 task_id: task_id_clone,
+                session_kind: session_kind.as_str().to_string(),
+                session_record_id,
                 code: exit_code,
             },
         );
@@ -964,10 +1280,7 @@ pub async fn stop_codex(
     state: State<'_, Arc<Mutex<CodexManager>>>,
     employee_id: String,
 ) -> Result<(), String> {
-    let running_process = {
-        let manager = state.lock().map_err(|e| e.to_string())?;
-        manager.get_process(&employee_id)
-    };
+    let running_process = get_live_managed_process(&app, &state, &employee_id).await?;
 
     if let Some(process) = running_process {
         let pool = sqlite_pool(&app).await?;
@@ -989,9 +1302,12 @@ pub async fn stop_codex(
         .await?;
 
         let mut child = process.child.lock().await;
-        child.start_kill()?;
+        if let Err(error) = child.kill_process_group() {
+            eprintln!("[codex-stop] killpg failed, fallback to child.kill(): {error}");
+        }
+        child.kill().await?;
         drop(child);
-        wait_until_process_stops(&state, &employee_id).await
+        wait_until_process_stops(&app, &state, &employee_id).await
     } else {
         Err(format!(
             "No running codex instance for employee {}",
@@ -1011,16 +1327,12 @@ pub async fn restart_codex(
     system_prompt: Option<String>,
     working_dir: Option<String>,
 ) -> Result<(), String> {
-    let is_running = {
-        let manager = state.lock().map_err(|e| e.to_string())?;
-        manager.is_running(&employee_id)
-    };
+    let is_running = get_live_managed_process(&app, &state, &employee_id)
+        .await?
+        .is_some();
 
     if is_running {
-        let running_process = {
-            let manager = state.lock().map_err(|e| e.to_string())?;
-            manager.get_process(&employee_id)
-        };
+        let running_process = get_live_managed_process(&app, &state, &employee_id).await?;
 
         if let Some(process) = running_process {
             let pool = sqlite_pool(&app).await?;
@@ -1042,10 +1354,13 @@ pub async fn restart_codex(
             .await?;
 
             let mut child = process.child.lock().await;
-            child.start_kill()?;
+            if let Err(error) = child.kill_process_group() {
+                eprintln!("[codex-restart] killpg failed, fallback to child.kill(): {error}");
+            }
+            child.kill().await?;
         }
 
-        wait_until_process_stops(&state, &employee_id).await?;
+        wait_until_process_stops(&app, &state, &employee_id).await?;
     }
 
     start_codex(
@@ -1057,6 +1372,7 @@ pub async fn restart_codex(
         reasoning_effort,
         system_prompt,
         working_dir,
+        None,
         None,
         None,
         None,

@@ -12,6 +12,7 @@ import type {
   Subtask,
   Task,
   TaskAttachment,
+  TaskLatestReview,
 } from "./types";
 
 export interface UpdateCodexSettingsInput {
@@ -71,9 +72,11 @@ export interface UpdateTaskInput {
   status?: string;
   priority?: string;
   assignee_id?: string | null;
+  reviewer_id?: string | null;
   complexity?: number | null;
   ai_suggestion?: string | null;
   last_codex_session_id?: string | null;
+  last_review_session_id?: string | null;
 }
 
 export async function healthCheck(): Promise<CodexHealthCheck> {
@@ -98,6 +101,14 @@ export async function openTaskAttachment(path: string): Promise<void> {
 
 export async function getCodexSessionStatus(employeeId: string): Promise<CodexRuntimeStatus> {
   return invoke("get_codex_session_status", { employeeId });
+}
+
+export async function getTaskLatestReview(taskId: string): Promise<TaskLatestReview | null> {
+  return invoke("get_task_latest_review", { taskId });
+}
+
+export async function startTaskCodeReview(taskId: string): Promise<void> {
+  return invoke("start_task_code_review", { taskId });
 }
 
 export async function getCodexSettings(): Promise<CodexSettings> {

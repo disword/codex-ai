@@ -6,6 +6,7 @@ import type { Task } from "@/lib/types";
 import { getPriorityLabel, getPriorityColor, formatDate } from "@/lib/utils";
 import { buildTaskExecutionInput } from "@/lib/taskPrompt";
 import { Clock, FolderKanban, GripVertical, MessageSquarePlus, Play, ScrollText, Square, Trash2 } from "lucide-react";
+import { startTaskCodeReview } from "@/lib/backend";
 import { ContinueConversationDialog } from "./ContinueConversationDialog";
 import { TaskDetailDialog } from "./TaskDetailDialog";
 import { DeleteTaskDialog } from "./DeleteTaskDialog";
@@ -26,7 +27,7 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
   const [showContinueDialog, setShowContinueDialog] = useState(false);
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [actionLoading, setActionLoading] = useState<"run" | "stop" | "continue" | null>(null);
+  const [actionLoading, setActionLoading] = useState<"run" | "stop" | "continue" | "review" | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const projects = useProjectStore((s) => s.projects);
   const employees = useEmployeeStore((s) => s.employees);
@@ -43,6 +44,7 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
   const fetchSubtasks = useTaskStore((s) => s.fetchSubtasks);
   const deleteTask = useTaskStore((s) => s.deleteTask);
   const assignee = task.assignee_id ? employees.find((employee) => employee.id === task.assignee_id) : undefined;
+  const reviewer = task.reviewer_id ? employees.find((employee) => employee.id === task.reviewer_id) : undefined;
 
   const isRunning = task.assignee_id
     ? (codexProcesses[task.assignee_id]?.running ?? false)
@@ -156,6 +158,7 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
       await refreshCodexRuntimeStatus(task.assignee_id);
     } catch (err) {
       console.error("Failed to stop codex:", err);
+      await refreshCodexRuntimeStatus(task.assignee_id);
     } finally {
       setActionLoading(null);
       setContextMenu(null);
@@ -173,6 +176,26 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
       console.error("Failed to delete task:", error);
     } finally {
       setDeleting(false);
+    }
+  };
+
+  const handleReviewCode = async () => {
+    if (task.status !== "review" || !task.reviewer_id) return;
+
+    setActionLoading("review");
+    try {
+      await updateEmployeeStatus(task.reviewer_id, "busy");
+      setCodexRunning(task.reviewer_id, true, task.id);
+      clearTaskCodexOutput(task.id, "review");
+      await startTaskCodeReview(task.id);
+    } catch (error) {
+      console.error("Failed to start code review:", error);
+      addCodexOutput(task.reviewer_id, `[ERROR] ${String(error)}`, task.id, "review");
+      setCodexRunning(task.reviewer_id, false, null);
+      await refreshCodexRuntimeStatus(task.reviewer_id);
+    } finally {
+      setActionLoading(null);
+      setContextMenu(null);
     }
   };
 
@@ -369,6 +392,22 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
                 >
                   <MessageSquarePlus className="h-4 w-4" />
                   继续对话
+                </button>
+              </>
+            )}
+            {task.status === "review" && (
+              <>
+                <div className="my-1 h-px bg-border" />
+                <button
+                  type="button"
+                  role="menuitem"
+                  onClick={() => void handleReviewCode()}
+                  disabled={!task.reviewer_id || actionLoading !== null}
+                  title={task.reviewer_id ? `由 ${reviewer?.name ?? "审查员"} 发起代码审核` : "请先指定审查员"}
+                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+                >
+                  <ScrollText className="h-4 w-4" />
+                  审核代码
                 </button>
               </>
             )}

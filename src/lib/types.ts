@@ -30,9 +30,11 @@ export interface Task {
   priority: string;
   project_id: string;
   assignee_id: string | null;
+  reviewer_id: string | null;
   complexity: number | null;
   ai_suggestion: string | null;
   last_codex_session_id: string | null;
+  last_review_session_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -103,12 +105,19 @@ export interface CodexSessionRecord {
   project_id: string | null;
   cli_session_id: string | null;
   working_dir: string | null;
+  session_kind: CodexSessionKind;
   status: string;
   started_at: string;
   ended_at: string | null;
   exit_code: number | null;
   resume_session_id: string | null;
   created_at: string;
+}
+
+export interface TaskLatestReview {
+  session: CodexSessionRecord;
+  report: string | null;
+  reviewer_name: string | null;
 }
 
 export interface CodexHealthCheck {
@@ -173,6 +182,7 @@ export interface DatabaseRestoreResult {
   message: string;
 }
 
+export type CodexSessionKind = "execution" | "review";
 export type CodexModelId = "gpt-5.4" | "gpt-5.4-mini" | "gpt-5.3-codex" | "gpt-5.2";
 export type ReasoningEffort = "low" | "medium" | "high" | "xhigh";
 export type TaskStatus = "todo" | "in_progress" | "review" | "completed" | "blocked";
