@@ -53,8 +53,8 @@ export function ProjectList() {
         </span>
       </div>
 
-      {/* Grid */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+      {/* Cards */}
+      <div className="flex flex-wrap items-start gap-4">
         {filtered.map((project) => (
           <ProjectCard
             key={project.id}
