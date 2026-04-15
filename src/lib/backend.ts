@@ -120,6 +120,10 @@ export async function prepareCodexSessionResume(
   return invoke("prepare_codex_session_resume", { sessionId });
 }
 
+export async function getCodexSessionLogLines(sessionId: string): Promise<string[]> {
+  return invoke("get_codex_session_log_lines", { sessionId });
+}
+
 export async function getTaskLatestReview(taskId: string): Promise<TaskLatestReview | null> {
   return invoke("get_task_latest_review", { taskId });
 }

@@ -1120,28 +1120,23 @@ pub async fn start_codex(
         return Err(format!("员工{}的Codex实例已在运行", employee_id));
     }
 
-    let requested_working_dir = match resolve_session_working_dir(
-        &app,
-        task_id.as_deref(),
-        working_dir.as_deref(),
-    )
-    .await
-    {
-        Ok(path) => path,
-        Err(error) => {
-            record_failed_session(
-                &app,
-                &employee_id,
-                task_id.as_deref(),
-                working_dir.as_deref(),
-                resume_session_id.as_deref(),
-                session_kind,
-                &error,
-            )
-            .await;
-            return Err(error);
-        }
-    };
+    let requested_working_dir =
+        match resolve_session_working_dir(&app, task_id.as_deref(), working_dir.as_deref()).await {
+            Ok(path) => path,
+            Err(error) => {
+                record_failed_session(
+                    &app,
+                    &employee_id,
+                    task_id.as_deref(),
+                    working_dir.as_deref(),
+                    resume_session_id.as_deref(),
+                    session_kind,
+                    &error,
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
     let run_cwd = match validate_runtime_working_dir(requested_working_dir.as_deref()) {
         Ok(path) => path,
@@ -1492,6 +1487,7 @@ pub async fn start_codex(
     let app_clone = app.clone();
     let eid = employee_id.clone();
     let task_id_for_stdout = task_id.clone();
+    let pool_for_stdout = pool.clone();
     let seen_stdout = seen.clone();
     let session_emitted_clone = session_emitted.clone();
     let session_record_id = session_record.id.clone();
@@ -1548,6 +1544,13 @@ pub async fn start_codex(
                         }
                     }
                 }
+                let _ = insert_codex_session_event(
+                    &pool_for_stdout,
+                    &session_record_id,
+                    "stdout",
+                    Some(&line),
+                )
+                .await;
                 let _ = app_clone.emit(
                     "codex-stdout",
                     CodexOutput {
@@ -1566,6 +1569,7 @@ pub async fn start_codex(
     let app_clone = app.clone();
     let eid = employee_id.clone();
     let task_id_for_stderr = task_id.clone();
+    let pool_for_stderr = pool.clone();
     let seen_stderr = seen.clone();
     let session_record_id_for_stderr = session_record.id.clone();
     let captured_stderr = captured_output.clone();
@@ -1604,6 +1608,13 @@ pub async fn start_codex(
                         }
                     }
                 }
+                let _ = insert_codex_session_event(
+                    &pool_for_stderr,
+                    &session_record_id_for_stderr,
+                    "stderr",
+                    Some(&line),
+                )
+                .await;
                 let _ = app_clone.emit(
                     "codex-stdout",
                     CodexOutput {

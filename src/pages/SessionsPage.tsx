@@ -10,6 +10,7 @@ import { Input } from "@/components/ui/input";
 import { listCodexSessions, prepareCodexSessionResume } from "@/lib/backend";
 import { startCodex } from "@/lib/codex";
 import type { CodexSessionListItem, CodexSessionResumeStatus } from "@/lib/types";
+import { formatDate } from "@/lib/utils";
 import { useEmployeeStore } from "@/stores/employeeStore";
 
 const PAGE_SIZE = 10;
@@ -75,6 +76,7 @@ function resumeBadgeVariant(status: CodexSessionResumeStatus): "default" | "seco
 }
 
 function buildLogTarget(session: {
+  session_record_id?: string | null;
   session_id?: string | null;
   resolved_session_id?: string | null;
   display_name?: string | null;
@@ -82,14 +84,17 @@ function buildLogTarget(session: {
   employee_name?: string | null;
   task_id?: string | null;
   task_title?: string | null;
+  session_kind?: CodexSessionListItem["session_kind"] | null;
 }): SessionLogTarget {
   return {
+    sessionRecordId: session.session_record_id ?? null,
     sessionId: session.resolved_session_id ?? session.session_id ?? "未知",
     displayName: session.display_name ?? "未命名会话",
     employeeId: session.employee_id ?? null,
     employeeName: session.employee_name ?? null,
     taskId: session.task_id ?? null,
     taskTitle: session.task_title ?? null,
+    sessionKind: session.session_kind ?? null,
   };
 }
 
@@ -170,7 +175,7 @@ export function SessionsPage() {
     }
   }, [page, totalPages]);
 
-  const loadSessions = async (silent = false) => {
+  const loadSessions = async (silent = false): Promise<CodexSessionListItem[]> => {
     if (silent) {
       setRefreshing(true);
     } else {
@@ -181,8 +186,10 @@ export function SessionsPage() {
     try {
       const [sessionItems] = await Promise.all([listCodexSessions(), fetchEmployees()]);
       setSessions(sessionItems);
+      return sessionItems;
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : "读取 Session 列表失败");
+      return [];
     } finally {
       setLoading(false);
       setRefreshing(false);
@@ -215,7 +222,7 @@ export function SessionsPage() {
     setInfoMessage(null);
 
     try {
-      const preview = await prepareCodexSessionResume(continueSession.session_id);
+      const preview = await prepareCodexSessionResume(continueSession.session_record_id);
       if (!preview.can_resume || !preview.resolved_session_id || !preview.employee_id) {
         setErrorMessage(preview.resume_message ?? "该 Session 当前不可继续对话");
         return;
@@ -231,16 +238,28 @@ export function SessionsPage() {
         workingDir: preview.working_dir ?? undefined,
         taskId: preview.task_id ?? undefined,
         resumeSessionId: preview.resolved_session_id,
+        sessionKind: preview.session_kind ?? undefined,
       });
 
-      const nextLogTarget = buildLogTarget(preview);
+      const sessionItems = await loadSessions(true);
+      const resumedSession = sessionItems.find((item) => (
+        item.employee_id === preview.employee_id
+        && item.cli_session_id === preview.resolved_session_id
+        && item.session_kind === (preview.session_kind ?? "execution")
+        && item.status === "running"
+      ));
+      const nextLogTarget = resumedSession
+        ? buildLogTarget(resumedSession)
+        : {
+            ...buildLogTarget(preview),
+            sessionRecordId: null,
+          };
       setActiveSession(nextLogTarget);
       setInfoMessage(`消息已发送到 Session ${preview.resolved_session_id}。`);
       setContinueDialogOpen(false);
       setContinueSession(null);
       setLogTarget(nextLogTarget);
       setLogDialogOpen(true);
-      await loadSessions(true);
     } catch (error) {
       if (continueSession.employee_id) {
         setCodexRunning(continueSession.employee_id, false, null);
@@ -373,7 +392,7 @@ export function SessionsPage() {
                             </div>
                           </td>
                           <td className="px-4 py-3 text-xs text-muted-foreground">
-                            {new Date(session.last_updated_at).toLocaleString("zh-CN")}
+                            {formatDate(session.last_updated_at)}
                           </td>
                           <td className="px-4 py-3">
                             <div className="space-y-1 text-xs">

@@ -1,3 +1,5 @@
+import { useEffect, useState } from "react";
+
 import { CodexTerminal } from "@/components/codex/CodexTerminal";
 import {
   Dialog,
@@ -6,14 +8,19 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { getCodexSessionLogLines } from "@/lib/backend";
+import type { CodexSessionKind } from "@/lib/types";
+import { useEmployeeStore } from "@/stores/employeeStore";
 
 interface SessionLogTarget {
+  sessionRecordId: string | null;
   sessionId: string;
   displayName: string;
   employeeId: string | null;
   employeeName: string | null;
   taskId: string | null;
   taskTitle: string | null;
+  sessionKind: CodexSessionKind | null;
 }
 
 interface SessionLogDialogProps {
@@ -27,7 +34,53 @@ export function SessionLogDialog({
   session,
   onOpenChange,
 }: SessionLogDialogProps) {
-  const canShowLogs = Boolean(session?.taskId || session?.employeeId);
+  const sessionLogs = useEmployeeStore((state) => state.sessionLogs);
+  const hydrateSessionLog = useEmployeeStore((state) => state.hydrateSessionLog);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
+  const sessionRecordId = session?.sessionRecordId ?? null;
+
+  useEffect(() => {
+    if (!open || !sessionRecordId || sessionLogs[sessionRecordId]) {
+      return;
+    }
+
+    let active = true;
+    setLoadingHistory(true);
+    setHistoryError(null);
+
+    void getCodexSessionLogLines(sessionRecordId)
+      .then((lines) => {
+        if (!active) {
+          return;
+        }
+        hydrateSessionLog(sessionRecordId, lines);
+      })
+      .catch((error) => {
+        if (!active) {
+          return;
+        }
+        setHistoryError(error instanceof Error ? error.message : "读取 Session 日志失败");
+      })
+      .finally(() => {
+        if (active) {
+          setLoadingHistory(false);
+        }
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [hydrateSessionLog, open, sessionLogs, sessionRecordId]);
+
+  useEffect(() => {
+    if (!open) {
+      setHistoryError(null);
+      setLoadingHistory(false);
+    }
+  }, [open]);
+
+  const canShowLogs = Boolean(session?.sessionRecordId || session?.taskId || session?.employeeId);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -46,16 +99,31 @@ export function SessionLogDialog({
 
         {session && (
           <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
+            <div className="font-mono">session record id: {session.sessionRecordId ?? "暂无"}</div>
             <div className="font-mono">session id: {session.sessionId}</div>
             <div className="mt-1">员工：{session.employeeName ?? session.employeeId ?? "未绑定"}</div>
             <div className="mt-1">任务：{session.taskTitle ?? "无关联任务"}</div>
           </div>
         )}
 
+        {historyError && (
+          <div className="rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">
+            {historyError}
+          </div>
+        )}
+
+        {loadingHistory && (
+          <div className="rounded-lg border border-border bg-muted/20 px-3 py-2 text-sm text-muted-foreground">
+            正在加载 Session 历史日志...
+          </div>
+        )}
+
         {canShowLogs ? (
           <div className="[&_div[data-slot='scroll-area']]:h-[28rem]">
-            {session?.taskId ? (
-              <CodexTerminal taskId={session.taskId} />
+            {session?.sessionRecordId ? (
+              <CodexTerminal sessionRecordId={session.sessionRecordId} />
+            ) : session?.taskId ? (
+              <CodexTerminal taskId={session.taskId} sessionKind={session.sessionKind ?? "execution"} />
             ) : (
               <CodexTerminal employeeId={session?.employeeId ?? undefined} />
             )}

@@ -21,16 +21,19 @@ interface EmployeeStore {
   loading: boolean;
   codexProcesses: Record<string, CodexProcessState>;
   taskLogs: Record<string, string[]>;
+  sessionLogs: Record<string, string[]>;
   fetchEmployees: () => Promise<void>;
   refreshCodexRuntimeStatus: (employeeId: string) => Promise<void>;
   createEmployee: (data: { name: string; role: string; model?: CodexModelId; reasoning_effort?: ReasoningEffort; specialization?: string; system_prompt?: string; project_id?: string }) => Promise<void>;
   updateEmployee: (id: string, updates: Partial<Pick<Employee, "name" | "role" | "model" | "reasoning_effort" | "specialization" | "system_prompt" | "project_id" | "status">>) => Promise<void>;
   deleteEmployee: (id: string) => Promise<void>;
   updateEmployeeStatus: (id: string, status: string) => Promise<void>;
-  addCodexOutput: (employeeId: string, line: string, taskId?: string | null, sessionKind?: CodexSessionKind) => void;
+  addCodexOutput: (employeeId: string, line: string, taskId?: string | null, sessionKind?: CodexSessionKind, sessionRecordId?: string | null) => void;
   setCodexRunning: (employeeId: string, running: boolean, activeTaskId?: string | null) => void;
   clearCodexOutput: (employeeId: string) => void;
   clearTaskCodexOutput: (taskId: string, sessionKind?: CodexSessionKind) => void;
+  hydrateSessionLog: (sessionRecordId: string, lines: string[]) => void;
+  clearSessionCodexOutput: (sessionRecordId: string) => void;
   initCodexListeners: () => () => void;
 }
 
@@ -69,6 +72,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   loading: false,
   codexProcesses: {},
   taskLogs: {},
+  sessionLogs: {},
 
   fetchEmployees: async () => {
     set({ loading: true });
@@ -164,7 +168,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     }));
   },
 
-  addCodexOutput: (employeeId, line, taskId, sessionKind = "execution") => {
+  addCodexOutput: (employeeId, line, taskId, sessionKind = "execution", sessionRecordId) => {
     set((state) => ({
       codexProcesses: {
         ...state.codexProcesses,
@@ -183,6 +187,15 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
             ],
           }
         : state.taskLogs,
+      sessionLogs: sessionRecordId
+        ? {
+            ...state.sessionLogs,
+            [sessionRecordId]: [
+              ...(state.sessionLogs[sessionRecordId] ?? []).slice(-1999),
+              line,
+            ],
+          }
+        : state.sessionLogs,
     }));
   },
 
@@ -222,6 +235,24 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     }));
   },
 
+  hydrateSessionLog: (sessionRecordId, lines) => {
+    set((state) => ({
+      sessionLogs: {
+        ...state.sessionLogs,
+        [sessionRecordId]: lines.slice(-2000),
+      },
+    }));
+  },
+
+  clearSessionCodexOutput: (sessionRecordId) => {
+    set((state) => ({
+      sessionLogs: {
+        ...state.sessionLogs,
+        [sessionRecordId]: [],
+      },
+    }));
+  },
+
   initCodexListeners: () => {
     codexListenerRefCount += 1;
 
@@ -233,6 +264,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
             output.line,
             output.task_id,
             output.session_kind,
+            output.session_record_id,
           );
         }),
         onCodexExit((exit) => {
@@ -241,6 +273,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
             `[EXIT] Code: ${exit.code ?? "unknown"}`,
             exit.task_id,
             exit.session_kind,
+            exit.session_record_id,
           );
           get().setCodexRunning(exit.employee_id, false, null);
           void get().updateEmployeeStatus(exit.employee_id, "offline");

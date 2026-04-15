@@ -44,6 +44,7 @@ pub fn run() {
             app::get_codex_session_status,
             app::list_codex_sessions,
             app::prepare_codex_session_resume,
+            app::get_codex_session_log_lines,
             app::get_task_latest_review,
             app::get_task_execution_change_history,
             app::start_task_code_review,

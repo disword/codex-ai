@@ -33,6 +33,7 @@ interface StartCodexOptions {
   workingDir?: string;
   taskId?: string;
   resumeSessionId?: string;
+  sessionKind?: CodexSessionKind;
   imagePaths?: string[];
 }
 
@@ -51,6 +52,7 @@ export async function startCodex(employeeId: string, taskDescription: string, op
     workingDir: options.workingDir ?? null,
     taskId: options.taskId ?? null,
     resumeSessionId: options.resumeSessionId ?? null,
+    sessionKind: options.sessionKind ?? null,
     imagePaths: options.imagePaths ?? null,
   });
 }

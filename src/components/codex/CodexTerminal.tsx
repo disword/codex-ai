@@ -8,16 +8,23 @@ import { Eraser } from "lucide-react";
 interface CodexTerminalProps {
   employeeId?: string;
   taskId?: string;
+  sessionRecordId?: string;
   sessionKind?: CodexSessionKind;
 }
 
-export function CodexTerminal({ employeeId, taskId, sessionKind = "execution" }: CodexTerminalProps) {
+export function CodexTerminal({ employeeId, taskId, sessionRecordId, sessionKind = "execution" }: CodexTerminalProps) {
   const codexProcesses = useEmployeeStore((s) => s.codexProcesses);
   const clearCodexOutput = useEmployeeStore((s) => s.clearCodexOutput);
   const clearTaskCodexOutput = useEmployeeStore((s) => s.clearTaskCodexOutput);
+  const clearSessionCodexOutput = useEmployeeStore((s) => s.clearSessionCodexOutput);
   const taskLogs = useEmployeeStore((s) => s.taskLogs);
+  const sessionLogs = useEmployeeStore((s) => s.sessionLogs);
   const process = employeeId ? codexProcesses[employeeId] : undefined;
-  const output = taskId ? taskLogs[buildTaskLogKey(taskId, sessionKind)] ?? [] : process?.output ?? [];
+  const output = sessionRecordId
+    ? sessionLogs[sessionRecordId] ?? []
+    : taskId
+      ? taskLogs[buildTaskLogKey(taskId, sessionKind)] ?? []
+      : process?.output ?? [];
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -36,6 +43,11 @@ export function CodexTerminal({ employeeId, taskId, sessionKind = "execution" }:
         <span className="text-xs text-zinc-500 font-mono">终端输出</span>
         <button
           onClick={() => {
+            if (sessionRecordId) {
+              clearSessionCodexOutput(sessionRecordId);
+              return;
+            }
+
             if (taskId) {
               clearTaskCodexOutput(taskId, sessionKind);
               return;

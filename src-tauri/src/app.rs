@@ -1833,6 +1833,30 @@ fn resolve_session_resume_state(
     ("ready".to_string(), None, true)
 }
 
+fn format_session_log_line(event_type: &str, message: &str) -> Option<String> {
+    let preserved = message.trim_end_matches(['\r', '\n']);
+    if preserved.trim().is_empty() {
+        return None;
+    }
+
+    match event_type {
+        "stdout" => Some(preserved.to_string()),
+        "stderr" => Some(if preserved.starts_with('[') {
+            preserved.to_string()
+        } else {
+            format!("[ERROR] {}", preserved)
+        }),
+        "session_failed"
+        | "spawn_failed"
+        | "validation_failed"
+        | "activity_log_failed"
+        | "session_file_changes_failed" => Some(format!("[ERROR] {}", preserved.trim())),
+        "session_exited" => Some(format!("[EXIT] {}", preserved.trim())),
+        "review_report" => None,
+        _ => Some(format!("[SYSTEM] {}", preserved.trim())),
+    }
+}
+
 async fn query_codex_session_list<R: Runtime>(
     app: &AppHandle<R>,
 ) -> Result<Vec<CodexSessionListItem>, String> {
@@ -1954,9 +1978,9 @@ pub async fn prepare_codex_session_resume<R: Runtime>(
     session_id: String,
 ) -> Result<CodexSessionResumePreview, String> {
     let mut items = query_codex_session_list(&app).await?;
-    let item = items
-        .drain(..)
-        .find(|current| current.session_id == session_id || current.session_record_id == session_id);
+    let item = items.drain(..).find(|current| {
+        current.session_id == session_id || current.session_record_id == session_id
+    });
 
     let Some(item) = item else {
         return Ok(CodexSessionResumePreview {
@@ -2016,6 +2040,58 @@ pub async fn prepare_codex_session_resume<R: Runtime>(
         resume_message,
         can_resume,
     })
+}
+
+#[tauri::command]
+pub async fn get_codex_session_log_lines<R: Runtime>(
+    app: AppHandle<R>,
+    session_id: String,
+) -> Result<Vec<String>, String> {
+    let pool = sqlite_pool(&app).await?;
+    let resolved_session_record_id = sqlx::query_scalar::<_, String>(
+        r#"
+        SELECT id
+        FROM codex_sessions
+        WHERE id = $1 OR cli_session_id = $1
+        ORDER BY CASE WHEN id = $1 THEN 0 ELSE 1 END, started_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&session_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("Failed to resolve session log target: {}", error))?;
+
+    let Some(resolved_session_record_id) = resolved_session_record_id else {
+        return Ok(Vec::new());
+    };
+
+    let rows = sqlx::query_as::<_, (String, Option<String>)>(
+        r#"
+        WITH recent AS (
+            SELECT event_type, message, created_at, id
+            FROM codex_session_events
+            WHERE session_id = $1
+              AND message IS NOT NULL
+            ORDER BY created_at DESC, id DESC
+            LIMIT 2000
+        )
+        SELECT event_type, message
+        FROM recent
+        ORDER BY created_at ASC, id ASC
+        "#,
+    )
+    .bind(&resolved_session_record_id)
+    .fetch_all(&pool)
+    .await
+    .map_err(|error| format!("Failed to fetch session log lines: {}", error))?;
+
+    Ok(rows
+        .into_iter()
+        .filter_map(|(event_type, message)| {
+            message.and_then(|value| format_session_log_line(&event_type, &value))
+        })
+        .collect())
 }
 
 #[tauri::command]
