@@ -608,7 +608,7 @@ fn canonicalize_existing_dir(path: &str) -> Result<String, String> {
         return Err(format!("路径 {} 不是目录", canonical.display()));
     }
 
-    Ok(canonical.to_string_lossy().to_string())
+    Ok(path_to_runtime_string(&canonical))
 }
 
 pub(crate) fn validate_project_repo_path(
@@ -620,15 +620,31 @@ pub(crate) fn validate_project_repo_path(
     }
 }
 
+pub(crate) fn normalize_runtime_path_string(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else if let Some(rest) = path.strip_prefix(r"\\?\") {
+        rest.to_string()
+    } else {
+        path.to_string()
+    }
+}
+
+pub(crate) fn path_to_runtime_string(path: &Path) -> String {
+    normalize_runtime_path_string(&path.to_string_lossy())
+}
+
 pub(crate) fn validate_runtime_working_dir(working_dir: Option<&str>) -> Result<String, String> {
     let resolved = match normalize_optional_text(working_dir) {
         Some(path) => canonicalize_existing_dir(&path)?,
-        None => std::env::current_dir()
-            .map_err(|error| format!("无法解析当前工作目录: {}", error))?
-            .canonicalize()
-            .map_err(|error| format!("无法访问当前工作目录: {}", error))?
-            .to_string_lossy()
-            .to_string(),
+        None => {
+            let current_dir = std::env::current_dir()
+                .map_err(|error| format!("无法解析当前工作目录: {}", error))?;
+            let canonical = current_dir
+                .canonicalize()
+                .map_err(|error| format!("无法访问当前工作目录: {}", error))?;
+            path_to_runtime_string(&canonical)
+        }
     };
 
     ensure_git_repository(Path::new(&resolved))?;
@@ -2725,8 +2741,8 @@ mod tests {
     use std::fs;
 
     use super::{
-        ensure_statement_terminated, sanitize_sql_backup_script, validate_project_repo_path,
-        validate_runtime_working_dir,
+        ensure_statement_terminated, normalize_runtime_path_string, sanitize_sql_backup_script,
+        validate_project_repo_path, validate_runtime_working_dir,
     };
 
     #[test]
@@ -2755,6 +2771,22 @@ mod tests {
         assert!(validated.contains("codex-ai-runtime"));
 
         fs::remove_dir_all(root).expect("cleanup temp dir");
+    }
+
+    #[test]
+    fn strips_windows_verbatim_path_prefixes() {
+        assert_eq!(
+            normalize_runtime_path_string(r"\\?\D:\repo\demo"),
+            r"D:\repo\demo"
+        );
+        assert_eq!(
+            normalize_runtime_path_string(r"\\?\UNC\server\share\demo"),
+            r"\\server\share\demo"
+        );
+        assert_eq!(
+            normalize_runtime_path_string(r"/tmp/codex-ai"),
+            "/tmp/codex-ai"
+        );
     }
 
     #[test]

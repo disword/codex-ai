@@ -14,8 +14,9 @@ use tokio::time::sleep;
 
 use crate::app::{
     fetch_codex_session_by_id, insert_activity_log, insert_codex_session_event,
-    insert_codex_session_record, now_sqlite, replace_codex_session_file_changes, sqlite_pool,
-    update_codex_session_record, validate_runtime_working_dir,
+    insert_codex_session_record, now_sqlite, path_to_runtime_string,
+    replace_codex_session_file_changes, sqlite_pool, update_codex_session_record,
+    validate_runtime_working_dir,
 };
 use crate::codex::{
     ensure_sdk_runtime_layout, inspect_sdk_runtime, load_codex_settings, new_codex_command,
@@ -601,7 +602,7 @@ fn collect_available_image_paths(image_paths: Option<Vec<String>>) -> (Vec<Strin
         let path = Path::new(trimmed);
         if path.is_file() {
             match path.canonicalize() {
-                Ok(canonical) => available.push(canonical.to_string_lossy().to_string()),
+                Ok(canonical) => available.push(path_to_runtime_string(&canonical)),
                 Err(_) => available.push(trimmed.to_string()),
             }
         } else {
@@ -1114,7 +1115,7 @@ pub async fn start_codex(
                                 sdk_codex_path_override = resolve_codex_executable_path()
                                     .await
                                     .ok()
-                                    .map(|path| path.to_string_lossy().to_string());
+                                    .map(|path| path_to_runtime_string(&path));
                                 if let Some(ref codex_path_override) = sdk_codex_path_override {
                                     command.env("CODEX_CLI_PATH", codex_path_override);
                                 }
@@ -1206,26 +1207,16 @@ pub async fn start_codex(
     configure_process_group(&mut cmd);
 
     if provider == CodexExecutionProvider::Cli {
-        cmd.arg("exec");
-        cmd.arg("--model").arg(model);
-        cmd.arg("-c")
-            .arg(format!("model_reasoning_effort=\"{}\"", reasoning_effort));
-        cmd.arg("-C").arg(&run_cwd);
-        if let Some(ref session_id) = resume_session_id {
-            cmd.arg("resume").arg(session_id);
-            for image_path in &image_paths {
-                cmd.arg("--image").arg(image_path);
-            }
-            cmd.arg(&prompt);
-        } else {
-            for image_path in &image_paths {
-                cmd.arg("--image").arg(image_path);
-            }
-            cmd.arg(&prompt);
-        }
-        cmd.stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped());
+        cmd.args(build_session_exec_args(
+            model,
+            reasoning_effort,
+            &run_cwd,
+            &image_paths,
+            resume_session_id.as_deref(),
+        ))
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     }
 
     for missing_path in &missing_image_paths {
@@ -1279,23 +1270,31 @@ pub async fn start_codex(
         }
     };
 
-    if provider == CodexExecutionProvider::Sdk {
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "mode": "session",
-            "prompt": prompt.clone(),
-            "input": build_sdk_input_items(&prompt, &image_paths),
-            "model": model,
-            "codexPathOverride": sdk_codex_path_override.clone(),
-            "workingDirectory": run_cwd.clone(),
-            "resumeSessionId": resume_session_id.clone(),
-        }))
-        .map_err(|error| format!("Failed to serialize Codex SDK session payload: {}", error))?;
+    match provider {
+        CodexExecutionProvider::Sdk => {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "mode": "session",
+                "prompt": prompt.clone(),
+                "input": build_sdk_input_items(&prompt, &image_paths),
+                "model": model,
+                "codexPathOverride": sdk_codex_path_override.clone(),
+                "workingDirectory": run_cwd.clone(),
+                "resumeSessionId": resume_session_id.clone(),
+            }))
+            .map_err(|error| format!("Failed to serialize Codex SDK session payload: {}", error))?;
 
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(&payload)
-                .await
-                .map_err(|error| format!("Failed to write Codex SDK session payload: {}", error))?;
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(&payload).await.map_err(|error| {
+                    format!("Failed to write Codex SDK session payload: {}", error)
+                })?;
+            }
+        }
+        CodexExecutionProvider::Cli => {
+            if let Some(mut stdin) = child.stdin.take() {
+                stdin.write_all(prompt.as_bytes()).await.map_err(|error| {
+                    format!("Failed to write Codex CLI session prompt: {}", error)
+                })?;
+            }
         }
     }
 
@@ -1936,6 +1935,34 @@ pub async fn send_codex_input(
 }
 
 /// Run a one-shot AI command using `codex exec`.
+fn build_session_exec_args(
+    model: &str,
+    reasoning_effort: &str,
+    run_cwd: &str,
+    image_paths: &[String],
+    resume_session_id: Option<&str>,
+) -> Vec<String> {
+    let mut args = vec![
+        "exec".to_string(),
+        "--model".to_string(),
+        model.to_string(),
+        "-c".to_string(),
+        format!("model_reasoning_effort=\"{}\"", reasoning_effort),
+        "-C".to_string(),
+        run_cwd.to_string(),
+    ];
+    if let Some(session_id) = resume_session_id {
+        args.push("resume".to_string());
+        args.push(session_id.to_string());
+    }
+    for image_path in image_paths {
+        args.push("--image".to_string());
+        args.push(image_path.clone());
+    }
+    args.push("-".to_string());
+    args
+}
+
 fn build_one_shot_exec_args(
     model: &str,
     reasoning_effort: &str,
@@ -2048,7 +2075,7 @@ async fn run_ai_command_via_sdk(
     let codex_path_override = resolve_codex_executable_path()
         .await
         .ok()
-        .map(|path| path.to_string_lossy().to_string());
+        .map(|path| path_to_runtime_string(&path));
     if let Some(ref codex_path_override) = codex_path_override {
         command.env("CODEX_CLI_PATH", codex_path_override);
     }
@@ -2301,11 +2328,11 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_ai_generate_plan_prompt, build_one_shot_exec_args, compose_codex_prompt,
-        compute_execution_session_file_changes_from_entries, extract_session_id_from_output,
-        format_session_prompt_log, hash_worktree_path, parse_ai_subtasks_response,
-        parse_sdk_bridge_output, parse_sdk_file_change_event, CodexExecutionProvider,
-        WorkingTreeSnapshotEntry,
+        build_ai_generate_plan_prompt, build_one_shot_exec_args, build_session_exec_args,
+        compose_codex_prompt, compute_execution_session_file_changes_from_entries,
+        extract_session_id_from_output, format_session_prompt_log, hash_worktree_path,
+        parse_ai_subtasks_response, parse_sdk_bridge_output, parse_sdk_file_change_event,
+        CodexExecutionProvider, WorkingTreeSnapshotEntry,
     };
 
     fn snapshot_entry(
@@ -2336,6 +2363,35 @@ mod tests {
     fn ignores_non_session_lines() {
         assert_eq!(extract_session_id_from_output("codex"), None);
         assert_eq!(extract_session_id_from_output("hook: SessionStart"), None);
+    }
+
+    #[test]
+    fn session_exec_args_pipe_prompt_via_stdin() {
+        let args = build_session_exec_args(
+            "gpt-5.4",
+            "high",
+            r"D:\repo\demo",
+            &["D:\\repo\\demo\\ui.png".to_string()],
+            Some("session-123"),
+        );
+
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+                "-c".to_string(),
+                "model_reasoning_effort=\"high\"".to_string(),
+                "-C".to_string(),
+                r"D:\repo\demo".to_string(),
+                "resume".to_string(),
+                "session-123".to_string(),
+                "--image".to_string(),
+                r"D:\repo\demo\ui.png".to_string(),
+                "-".to_string(),
+            ]
+        );
     }
 
     #[test]
