@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "AI员工协作系统",
+  "productName": "AI employee collaboration system",
   "version": "0.1.0",
   "identifier": "com.wenyuan.codex-ai",
   "build": {
