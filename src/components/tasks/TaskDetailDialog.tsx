@@ -380,8 +380,18 @@ export function TaskDetailDialog({
     return sections.join("\n\n");
   };
 
+  const buildAiExecutionContext = () => ({
+    taskId: task.id,
+    workingDir: projectRepoPath ?? undefined,
+  });
+
   const logOneShotAiContext = async (operation: string, imagePaths: string[]) => {
     appendAiLog(`[${operation}] 已载入任务图片 ${imagePaths.length} 张`);
+    appendAiLog(
+      `[${operation}] 当前项目目录：${
+        projectRepoPath?.trim() ? projectRepoPath : "未配置（本次不会附带项目目录上下文）"
+      }`,
+    );
 
     const [settingsResult, healthResult] = await Promise.allSettled([
       getCodexSettings(),
@@ -580,7 +590,12 @@ export function TaskDetailDialog({
         .join("; ");
       const desc = task.description ?? task.title;
       appendAiLog("[AI建议指派] 已提交给 AI，等待响应...");
-      const result = await aiSuggestAssignee(desc, employeeList, imagePaths);
+      const result = await aiSuggestAssignee(
+        desc,
+        employeeList,
+        imagePaths,
+        buildAiExecutionContext(),
+      );
       setAiResult(result);
       await updateTask(task.id, { ai_suggestion: result });
       appendAiLog("[AI建议指派] 执行完成");
@@ -602,7 +617,7 @@ export function TaskDetailDialog({
       await logOneShotAiContext("复杂度分析", imagePaths);
       const desc = task.description ?? task.title;
       appendAiLog("[复杂度分析] 已提交给 AI，等待响应...");
-      const result = await aiAnalyzeComplexity(desc, imagePaths);
+      const result = await aiAnalyzeComplexity(desc, imagePaths, buildAiExecutionContext());
       setAiResult(result);
       const match = result.match(/(\d+)/);
       if (match) {
@@ -630,6 +645,7 @@ export function TaskDetailDialog({
         task.description ?? "",
         `Status: ${task.status}, Priority: ${task.priority}`,
         imagePaths,
+        buildAiExecutionContext(),
       );
       await addComment(task.id, result, undefined, true);
       appendAiLog("[AI生成评论] 执行完成");
@@ -658,7 +674,12 @@ export function TaskDetailDialog({
       const imagePaths = await loadCurrentImagePaths();
       await logOneShotAiContext("AI拆分子任务", imagePaths);
       appendAiLog("[AI拆分子任务] 已提交给 AI，等待响应...");
-      const generatedSubtasks = await aiSplitSubtasks(taskTitle, taskDescription, imagePaths);
+      const generatedSubtasks = await aiSplitSubtasks(
+        taskTitle,
+        taskDescription,
+        imagePaths,
+        buildAiExecutionContext(),
+      );
       const { inserted, skipped } = await addSubtasks(task.id, generatedSubtasks);
 
       if (inserted === 0) {
@@ -707,6 +728,7 @@ export function TaskDetailDialog({
         priority,
         latestSubtasks,
         imagePaths,
+        buildAiExecutionContext(),
       );
       const trimmedPlan = plan.trim();
 

@@ -16,7 +16,7 @@ use crate::app::{
     fetch_codex_session_by_id, insert_activity_log, insert_codex_session_event,
     insert_codex_session_record, now_sqlite, path_to_runtime_string,
     replace_codex_session_file_changes, sqlite_pool, update_codex_session_record,
-    validate_runtime_working_dir,
+    validate_project_repo_path, validate_runtime_working_dir,
 };
 use crate::codex::{
     ensure_sdk_runtime_layout, inspect_sdk_runtime, load_codex_settings, new_codex_command,
@@ -629,6 +629,60 @@ fn build_sdk_input_items(prompt: &str, image_paths: &[String]) -> Vec<serde_json
     items
 }
 
+async fn resolve_task_project_repo_path(
+    app: &AppHandle,
+    task_id: &str,
+) -> Result<Option<String>, String> {
+    sqlx::query_scalar::<_, Option<String>>(
+        "SELECT projects.repo_path FROM tasks INNER JOIN projects ON projects.id = tasks.project_id WHERE tasks.id = $1 LIMIT 1",
+    )
+    .bind(task_id)
+    .fetch_optional(&sqlite_pool(app).await?)
+    .await
+    .map_err(|error| format!("Failed to resolve task {} project repo path: {}", task_id, error))?
+    .ok_or_else(|| format!("Task {} not found when resolving project path", task_id))
+}
+
+async fn resolve_one_shot_working_dir(
+    app: &AppHandle,
+    task_id: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(explicit_working_dir) = working_dir.map(str::trim).filter(|value| !value.is_empty())
+    {
+        return validate_project_repo_path(Some(explicit_working_dir));
+    }
+
+    let Some(task_id) = task_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    match resolve_task_project_repo_path(app, task_id).await? {
+        Some(repo_path) => validate_project_repo_path(Some(&repo_path)),
+        None => Ok(None),
+    }
+}
+
+async fn resolve_session_working_dir(
+    app: &AppHandle,
+    task_id: Option<&str>,
+    working_dir: Option<&str>,
+) -> Result<Option<String>, String> {
+    if let Some(explicit_working_dir) = working_dir.map(str::trim).filter(|value| !value.is_empty())
+    {
+        return validate_project_repo_path(Some(explicit_working_dir));
+    }
+
+    let Some(task_id) = task_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+
+    match resolve_task_project_repo_path(app, task_id).await? {
+        Some(repo_path) => validate_project_repo_path(Some(&repo_path)),
+        None => Err("当前任务所属项目未配置仓库路径，无法启动 Codex。".to_string()),
+    }
+}
+
 fn sdk_codex_path_override_allowed_for_os(path: &Path, target_os: &str) -> bool {
     if target_os != "windows" {
         return true;
@@ -1066,7 +1120,13 @@ pub async fn start_codex(
         return Err(format!("员工{}的Codex实例已在运行", employee_id));
     }
 
-    let run_cwd = match validate_runtime_working_dir(working_dir.as_deref()) {
+    let requested_working_dir = match resolve_session_working_dir(
+        &app,
+        task_id.as_deref(),
+        working_dir.as_deref(),
+    )
+    .await
+    {
         Ok(path) => path,
         Err(error) => {
             record_failed_session(
@@ -1074,6 +1134,23 @@ pub async fn start_codex(
                 &employee_id,
                 task_id.as_deref(),
                 working_dir.as_deref(),
+                resume_session_id.as_deref(),
+                session_kind,
+                &error,
+            )
+            .await;
+            return Err(error);
+        }
+    };
+
+    let run_cwd = match validate_runtime_working_dir(requested_working_dir.as_deref()) {
+        Ok(path) => path,
+        Err(error) => {
+            record_failed_session(
+                &app,
+                &employee_id,
+                task_id.as_deref(),
+                requested_working_dir.as_deref(),
                 resume_session_id.as_deref(),
                 session_kind,
                 &error,
@@ -1983,6 +2060,7 @@ fn build_session_exec_args(
 fn build_one_shot_exec_args(
     model: &str,
     reasoning_effort: &str,
+    working_dir: Option<&str>,
     image_paths: &[String],
 ) -> Vec<String> {
     let mut args = vec![
@@ -1993,6 +2071,10 @@ fn build_one_shot_exec_args(
         "-c".to_string(),
         format!("model_reasoning_effort=\"{}\"", reasoning_effort),
     ];
+    if let Some(working_dir) = working_dir {
+        args.push("-C".to_string());
+        args.push(working_dir.to_string());
+    }
     for image_path in image_paths {
         args.push("--image".to_string());
         args.push(image_path.clone());
@@ -2004,6 +2086,7 @@ async fn run_ai_command_via_exec(
     prompt: String,
     model: &str,
     reasoning_effort: &str,
+    working_dir: Option<&str>,
     image_paths: &[String],
 ) -> Result<String, String> {
     let mut cmd = new_codex_command()
@@ -2015,6 +2098,7 @@ async fn run_ai_command_via_exec(
         .args(build_one_shot_exec_args(
             model,
             reasoning_effort,
+            working_dir,
             image_paths,
         ))
         .stdin(std::process::Stdio::piped())
@@ -2078,6 +2162,7 @@ async fn run_ai_command_via_sdk(
     prompt: &str,
     model: &str,
     reasoning_effort: &str,
+    working_dir: Option<&str>,
     image_paths: &[String],
 ) -> Result<String, String> {
     let settings = load_codex_settings(app)?;
@@ -2112,6 +2197,7 @@ async fn run_ai_command_via_sdk(
             "input": build_sdk_input_items(prompt, image_paths),
             "model": model,
             "modelReasoningEffort": reasoning_effort,
+            "workingDirectory": working_dir,
             "codexPathOverride": codex_path_override,
         }))
         .map_err(|error| format!("Failed to serialize SDK request: {}", error))?;
@@ -2132,6 +2218,8 @@ async fn run_ai_command(
     app: &AppHandle,
     prompt: String,
     image_paths: Option<Vec<String>>,
+    task_id: Option<String>,
+    working_dir: Option<String>,
 ) -> Result<String, String> {
     let (image_paths, missing_image_paths) = collect_available_image_paths(image_paths);
     let mut one_shot_model = normalize_model(None).to_string();
@@ -2141,6 +2229,9 @@ async fn run_ai_command(
     for missing_path in &missing_image_paths {
         eprintln!("[codex-sdk] one-shot 附件图片不存在，已跳过: {missing_path}");
     }
+
+    let working_dir =
+        resolve_one_shot_working_dir(app, task_id.as_deref(), working_dir.as_deref()).await?;
 
     if let Ok(settings) = load_codex_settings(app) {
         one_shot_model = normalize_model(Some(&settings.one_shot_model)).to_string();
@@ -2154,6 +2245,7 @@ async fn run_ai_command(
                     &prompt,
                     &one_shot_model,
                     &one_shot_reasoning_effort,
+                    working_dir.as_deref(),
                     &image_paths,
                 )
                 .await
@@ -2174,6 +2266,7 @@ async fn run_ai_command(
         prompt,
         &one_shot_model,
         &one_shot_reasoning_effort,
+        working_dir.as_deref(),
         &image_paths,
     )
     .await
@@ -2491,7 +2584,7 @@ mod tests {
 
     #[test]
     fn one_shot_exec_args_skip_git_repo_check() {
-        let args = build_one_shot_exec_args("gpt-5.4", "high", &[]);
+        let args = build_one_shot_exec_args("gpt-5.4", "high", None, &[]);
 
         assert_eq!(
             args,
@@ -2511,6 +2604,7 @@ mod tests {
         let args = build_one_shot_exec_args(
             "gpt-5.4-mini",
             "medium",
+            None,
             &["/tmp/demo/a.png".to_string(), "/tmp/demo/b.jpg".to_string()],
         );
 
@@ -2527,6 +2621,25 @@ mod tests {
                 "/tmp/demo/a.png".to_string(),
                 "--image".to_string(),
                 "/tmp/demo/b.jpg".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn one_shot_exec_args_include_working_dir_when_provided() {
+        let args = build_one_shot_exec_args("gpt-5.4", "high", Some("/tmp/worktree"), &[]);
+
+        assert_eq!(
+            args,
+            vec![
+                "exec".to_string(),
+                "--skip-git-repo-check".to_string(),
+                "--model".to_string(),
+                "gpt-5.4".to_string(),
+                "-c".to_string(),
+                "model_reasoning_effort=\"high\"".to_string(),
+                "-C".to_string(),
+                "/tmp/worktree".to_string(),
             ]
         );
     }
@@ -2737,12 +2850,14 @@ pub async fn ai_suggest_assignee(
     task_description: String,
     employee_list: String,
     image_paths: Option<Vec<String>>,
+    task_id: Option<String>,
+    working_dir: Option<String>,
 ) -> Result<String, String> {
     let prompt = format!(
         "Based on the following task description, suggest the best assignee from the employee list. If task images are attached, consider them as additional context.\n\nTask: {}\n\nEmployees: {}\n\nRespond with just the employee ID and a brief reason.",
         task_description, employee_list
     );
-    run_ai_command(&app, prompt, image_paths).await
+    run_ai_command(&app, prompt, image_paths, task_id, working_dir).await
 }
 
 #[tauri::command]
@@ -2750,12 +2865,14 @@ pub async fn ai_analyze_complexity(
     app: AppHandle,
     task_description: String,
     image_paths: Option<Vec<String>>,
+    task_id: Option<String>,
+    working_dir: Option<String>,
 ) -> Result<String, String> {
     let prompt = format!(
         "Analyze the complexity of this task on a scale of 1-10, and provide a brief breakdown. If task images are attached, include them in the analysis.\n\nTask: {}",
         task_description
     );
-    run_ai_command(&app, prompt, image_paths).await
+    run_ai_command(&app, prompt, image_paths, task_id, working_dir).await
 }
 
 #[tauri::command]
@@ -2765,12 +2882,14 @@ pub async fn ai_generate_comment(
     task_description: String,
     context: String,
     image_paths: Option<Vec<String>>,
+    task_id: Option<String>,
+    working_dir: Option<String>,
 ) -> Result<String, String> {
     let prompt = format!(
         "Generate a progress assessment comment for this task. If task images are attached, use them as supporting context.\n\nTitle: {}\nDescription: {}\nContext: {}",
         task_title, task_description, context
     );
-    run_ai_command(&app, prompt, image_paths).await
+    run_ai_command(&app, prompt, image_paths, task_id, working_dir).await
 }
 
 #[tauri::command]
@@ -2782,6 +2901,8 @@ pub async fn ai_generate_plan(
     task_priority: String,
     subtasks: Vec<String>,
     image_paths: Option<Vec<String>>,
+    task_id: Option<String>,
+    working_dir: Option<String>,
 ) -> Result<String, String> {
     let prompt = build_ai_generate_plan_prompt(
         &task_title,
@@ -2790,7 +2911,7 @@ pub async fn ai_generate_plan(
         &task_priority,
         &subtasks,
     );
-    run_ai_command(&app, prompt, image_paths).await
+    run_ai_command(&app, prompt, image_paths, task_id, working_dir).await
 }
 
 #[tauri::command]
@@ -2799,6 +2920,8 @@ pub async fn ai_split_subtasks(
     task_title: String,
     task_description: String,
     image_paths: Option<Vec<String>>,
+    task_id: Option<String>,
+    working_dir: Option<String>,
 ) -> Result<Vec<String>, String> {
     let prompt = format!(
         "你是任务拆分助手。请根据任务标题和描述拆分 3 到 8 个可执行、可验证、粒度适中的子任务。\n\
@@ -2813,6 +2936,6 @@ pub async fn ai_split_subtasks(
         task_title.trim(),
         task_description.trim()
     );
-    let raw = run_ai_command(&app, prompt, image_paths).await?;
+    let raw = run_ai_command(&app, prompt, image_paths, task_id, working_dir).await?;
     parse_ai_subtasks_response(&raw)
 }

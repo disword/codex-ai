@@ -36,6 +36,11 @@ interface StartCodexOptions {
   imagePaths?: string[];
 }
 
+interface AiExecutionContext {
+  taskId?: string;
+  workingDir?: string;
+}
+
 export async function startCodex(employeeId: string, taskDescription: string, options: StartCodexOptions = {}): Promise<void> {
   await invoke("start_codex", {
     employeeId,
@@ -90,21 +95,27 @@ export async function aiSuggestAssignee(
   taskDescription: string,
   employeeList: string,
   imagePaths?: string[],
+  context: AiExecutionContext = {},
 ): Promise<string> {
   return invoke<string>("ai_suggest_assignee", {
     taskDescription,
     employeeList,
     imagePaths: imagePaths ?? null,
+    taskId: context.taskId ?? null,
+    workingDir: context.workingDir ?? null,
   });
 }
 
 export async function aiAnalyzeComplexity(
   taskDescription: string,
   imagePaths?: string[],
+  context: AiExecutionContext = {},
 ): Promise<string> {
   return invoke<string>("ai_analyze_complexity", {
     taskDescription,
     imagePaths: imagePaths ?? null,
+    taskId: context.taskId ?? null,
+    workingDir: context.workingDir ?? null,
   });
 }
 
@@ -113,12 +124,15 @@ export async function aiGenerateComment(
   taskDescription: string,
   context: string,
   imagePaths?: string[],
+  executionContext: AiExecutionContext = {},
 ): Promise<string> {
   return invoke<string>("ai_generate_comment", {
     taskTitle,
     taskDescription,
     context,
     imagePaths: imagePaths ?? null,
+    taskId: executionContext.taskId ?? null,
+    workingDir: executionContext.workingDir ?? null,
   });
 }
 
@@ -126,11 +140,14 @@ export async function aiSplitSubtasks(
   taskTitle: string,
   taskDescription: string,
   imagePaths?: string[],
+  context: AiExecutionContext = {},
 ): Promise<string[]> {
   return invoke<string[]>("ai_split_subtasks", {
     taskTitle,
     taskDescription,
     imagePaths: imagePaths ?? null,
+    taskId: context.taskId ?? null,
+    workingDir: context.workingDir ?? null,
   });
 }
 
@@ -141,6 +158,7 @@ export async function aiGeneratePlan(
   taskPriority: string,
   subtasks: string[],
   imagePaths?: string[],
+  context: AiExecutionContext = {},
 ): Promise<string> {
   return invoke<string>("ai_generate_plan", {
     taskTitle,
@@ -149,5 +167,7 @@ export async function aiGeneratePlan(
     taskPriority,
     subtasks,
     imagePaths: imagePaths ?? null,
+    taskId: context.taskId ?? null,
+    workingDir: context.workingDir ?? null,
   });
 }
