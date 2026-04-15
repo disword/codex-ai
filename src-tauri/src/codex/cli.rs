@@ -29,6 +29,10 @@ pub async fn new_codex_command() -> Result<Command, String> {
     build_command("codex", CODEX_PATH_ENV_VARS, None, &[], None).await
 }
 
+pub async fn resolve_codex_executable_path() -> Result<PathBuf, String> {
+    resolve_executable("codex", CODEX_PATH_ENV_VARS, None, &[]).await
+}
+
 pub async fn new_node_command(node_path_override: Option<&str>) -> Result<Command, String> {
     let explicit_path = normalize_override_path(node_path_override)?;
     build_command(

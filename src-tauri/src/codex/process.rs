@@ -19,7 +19,7 @@ use crate::app::{
 };
 use crate::codex::{
     ensure_sdk_runtime_layout, inspect_sdk_runtime, load_codex_settings, new_codex_command,
-    new_node_command, sdk_bridge_script_path, CodexManager,
+    new_node_command, resolve_codex_executable_path, sdk_bridge_script_path, CodexManager,
 };
 use crate::db::models::{CodexExit, CodexOutput, CodexSession, CodexSessionFileChangeInput};
 
@@ -1090,6 +1090,7 @@ pub async fn start_codex(
     let prompt = compose_codex_prompt(&task_description, system_prompt.as_deref());
     let (image_paths, missing_image_paths) = collect_available_image_paths(image_paths);
     let mut provider = CodexExecutionProvider::Cli;
+    let mut sdk_codex_path_override = None;
     let mut session_lookup_started_at = None;
 
     let command_result: Result<tokio::process::Command, String> =
@@ -1110,6 +1111,13 @@ pub async fn start_codex(
                         match new_node_command(settings.node_path_override.as_deref()).await {
                             Ok(mut command) => {
                                 provider = CodexExecutionProvider::Sdk;
+                                sdk_codex_path_override = resolve_codex_executable_path()
+                                    .await
+                                    .ok()
+                                    .map(|path| path.to_string_lossy().to_string());
+                                if let Some(ref codex_path_override) = sdk_codex_path_override {
+                                    command.env("CODEX_CLI_PATH", codex_path_override);
+                                }
                                 command
                                     .arg(&bridge_path)
                                     .current_dir(&run_cwd)
@@ -1277,6 +1285,7 @@ pub async fn start_codex(
             "prompt": prompt.clone(),
             "input": build_sdk_input_items(&prompt, &image_paths),
             "model": model,
+            "codexPathOverride": sdk_codex_path_override.clone(),
             "workingDirectory": run_cwd.clone(),
             "resumeSessionId": resume_session_id.clone(),
         }))
@@ -2036,6 +2045,13 @@ async fn run_ai_command_via_sdk(
     }
 
     let mut command = new_node_command(settings.node_path_override.as_deref()).await?;
+    let codex_path_override = resolve_codex_executable_path()
+        .await
+        .ok()
+        .map(|path| path.to_string_lossy().to_string());
+    if let Some(ref codex_path_override) = codex_path_override {
+        command.env("CODEX_CLI_PATH", codex_path_override);
+    }
     command
         .arg(&bridge_path)
         .current_dir(&install_dir)
@@ -2052,6 +2068,7 @@ async fn run_ai_command_via_sdk(
             "input": build_sdk_input_items(prompt, image_paths),
             "model": model,
             "modelReasoningEffort": reasoning_effort,
+            "codexPathOverride": codex_path_override,
         }))
         .map_err(|error| format!("Failed to serialize SDK request: {}", error))?;
         stdin

@@ -316,8 +316,20 @@ async function main() {
     const payload = await readInput();
     mode = payload.mode === "session" ? "session" : "one_shot";
     const input = normalizeInput(payload);
+    const codexPathOverride =
+      typeof payload.codexPathOverride === "string" && payload.codexPathOverride.trim()
+        ? payload.codexPathOverride.trim()
+        : typeof process.env.CODEX_CLI_PATH === "string" && process.env.CODEX_CLI_PATH.trim()
+          ? process.env.CODEX_CLI_PATH.trim()
+          : undefined;
 
-    const codex = new Codex();
+    const codex = new Codex(
+      codexPathOverride
+        ? {
+            codexPathOverride,
+          }
+        : undefined,
+    );
     const threadOptions = {
       sandboxMode: "danger-full-access",
       skipGitRepoCheck: true,

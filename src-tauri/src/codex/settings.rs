@@ -387,6 +387,7 @@ pub async fn install_codex_sdk_runtime<R: Runtime>(
         .arg("install")
         .arg("--no-audit")
         .arg("--no-fund")
+        .arg("--include=optional")
         .arg(SDK_PACKAGE_NAME)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
