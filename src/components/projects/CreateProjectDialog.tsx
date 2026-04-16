@@ -10,6 +10,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { RepoPathField } from "@/components/projects/RepoPathField";
+import { getProjectTypeLabel } from "@/lib/projects";
 import {
   Select,
   SelectContent,
@@ -136,7 +137,9 @@ export function CreateProjectDialog({ open, onOpenChange }: CreateProjectDialogP
               }}
             >
               <SelectTrigger className="mt-1 bg-background">
-                <SelectValue />
+                <SelectValue>
+                  {(value) => getProjectTypeLabel(typeof value === "string" ? value as ProjectType : projectType)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="local">本地项目</SelectItem>

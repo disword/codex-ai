@@ -3641,22 +3641,13 @@ printf 'CODEX_STATUS=%s\\nCODEX_VERSION=%s\\nNODE_STATUS=%s\\nNODE_VERSION=%s\\n
         .get("SDK_INSTALLED")
         .map(|value| value == "1")
         .unwrap_or(false);
-    let task_execution_effective_provider =
-        if remote_settings.task_sdk_enabled && node_available && sdk_installed {
-            "sdk".to_string()
-        } else {
-            "exec".to_string()
-        };
-    let one_shot_effective_provider =
-        if remote_settings.one_shot_sdk_enabled && node_available && sdk_installed {
-            "sdk".to_string()
-        } else {
-            "exec".to_string()
-        };
+    let task_execution_effective_provider = "exec".to_string();
+    let one_shot_effective_provider = "exec".to_string();
     let status_message = if !redacted_stderr.is_empty() {
         redacted_stderr.clone()
     } else if codex_available {
-        "远程 Codex 健康检查完成".to_string()
+        "远程 Codex 健康检查完成；SSH v1 当前固定使用远程 codex exec，SDK 状态仅用于安装与环境检查。"
+            .to_string()
     } else {
         "远程 Codex 不可用".to_string()
     };

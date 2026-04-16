@@ -30,6 +30,23 @@ import type {
   TaskLatestReview,
 } from "./types";
 
+type RawHealthCheck = CodexHealthCheck & {
+  password_auth_available?: boolean | null;
+  execution_target?: string | null;
+};
+
+type RawSshConfig = SshConfig & {
+  password_auth_available?: boolean | null;
+};
+
+type RawSshPasswordProbeResult = Omit<SshPasswordProbeResult, "status" | "execution_allowed"> & {
+  auth_type?: "key" | "password" | null;
+  status?: string | null;
+  execution_allowed?: boolean | null;
+  supported?: boolean | null;
+  target_host_label?: string | null;
+};
+
 function normalizeExecutionTarget(value: string | null | undefined): EnvironmentMode {
   return value === "ssh" ? "ssh" : "local";
 }
@@ -54,7 +71,7 @@ function normalizeSessionListItem(session: CodexSessionListItem): CodexSessionLi
   };
 }
 
-function normalizeHealthCheck<T extends CodexHealthCheck>(health: T): T {
+function normalizeHealthCheck(health: RawHealthCheck): CodexHealthCheck {
   const passwordExecutionAllowed =
     health.password_execution_allowed
     ?? health.password_auth_available
@@ -67,11 +84,10 @@ function normalizeHealthCheck<T extends CodexHealthCheck>(health: T): T {
     password_probe_status: health.password_probe_status ?? null,
     password_probe_message: health.password_probe_message ?? null,
     password_execution_allowed: passwordExecutionAllowed,
-    password_auth_available: passwordExecutionAllowed,
   };
 }
 
-function normalizeSshConfig(config: SshConfig): SshConfig {
+function normalizeSshConfig(config: RawSshConfig): SshConfig {
   const passwordExecutionAllowed =
     config.password_execution_allowed
     ?? config.password_auth_available
@@ -86,22 +102,26 @@ function normalizeSshConfig(config: SshConfig): SshConfig {
     password_probe_status: config.password_probe_status ?? null,
     password_probe_message: config.password_probe_message ?? null,
     password_execution_allowed: passwordExecutionAllowed,
-    password_auth_available: passwordExecutionAllowed,
     last_checked_at: config.last_checked_at ?? null,
     last_check_status: config.last_check_status ?? null,
     last_check_message: config.last_check_message ?? null,
   };
 }
 
-function normalizePasswordProbeResult(result: SshPasswordProbeResult): SshPasswordProbeResult {
+function normalizePasswordProbeResult(result: RawSshPasswordProbeResult): SshPasswordProbeResult {
   const executionAllowed = result.execution_allowed ?? result.supported ?? false;
+  const status =
+    result.status === "passed"
+      ? "supported"
+      : result.status === "supported" || result.status === "unsupported" || result.status === "failed"
+        ? result.status
+        : "failed";
   return {
     ...result,
-    auth_type: result.auth_type ?? "password",
+    auth_type: result.auth_type === "key" ? "key" : "password",
     execution_allowed: executionAllowed,
-    supported: executionAllowed,
     target_host_label: result.target_host_label ?? null,
-    status: result.status === "passed" ? "supported" : result.status ?? "failed",
+    status,
   };
 }
 
@@ -213,9 +233,18 @@ export async function healthCheck(): Promise<CodexHealthCheck> {
 }
 
 export async function getRemoteHealthCheck(sshConfigId: string): Promise<RemoteCodexHealthCheck> {
-  return normalizeHealthCheck(
+  const normalized = normalizeHealthCheck(
     await invoke<RemoteCodexHealthCheck>("validate_remote_codex_health", { sshConfigId }),
   );
+  return {
+    ...normalized,
+    execution_target: "ssh",
+    ssh_config_id: normalized.ssh_config_id ?? sshConfigId,
+    target_host_label: normalized.target_host_label ?? null,
+    password_probe_status: normalized.password_probe_status ?? null,
+    password_probe_message: normalized.password_probe_message ?? null,
+    password_execution_allowed: normalized.password_execution_allowed ?? false,
+  } as RemoteCodexHealthCheck;
 }
 
 export async function backupDatabase(destinationPath: string): Promise<DatabaseBackupResult> {

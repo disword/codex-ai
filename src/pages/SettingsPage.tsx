@@ -512,7 +512,7 @@ export function SettingsPage() {
     }
   }
 
-  async function handleRunPasswordProbe() {
+  async function handleTestConnection() {
     if (!selectedSshConfigId) {
       return;
     }
@@ -522,12 +522,21 @@ export function SettingsPage() {
     setSshFormMessage(null);
 
     try {
-      const result = await useProjectStore.getState().runSshPasswordProbe(selectedSshConfigId);
-      setSshFormMessage(result.message);
+      if (selectedSshConfig?.auth_type === "password") {
+        const result = await useProjectStore.getState().runSshPasswordProbe(selectedSshConfigId);
+        setSshFormMessage(`测试连接结果：${result.message}`);
+      } else {
+        const health = await getRemoteHealthCheck(selectedSshConfigId);
+        setSshFormMessage(
+          health.codex_available
+            ? "测试连接成功，远程主机可访问。"
+            : `测试连接成功，但远程 Codex 当前不可用：${health.sdk_status_message}`,
+        );
+      }
       await loadRuntimeState();
     } catch (error) {
-      console.error("Failed to run SSH password probe:", error);
-      setSshFormError(error instanceof Error ? error.message : "密码登录探测失败");
+      console.error("Failed to test SSH connection:", error);
+      setSshFormError(error instanceof Error ? error.message : "SSH 测试连接失败");
     } finally {
       setSshFormLoading(null);
     }
@@ -598,7 +607,7 @@ export function SettingsPage() {
                 配置存在但当前平台不可执行
               </div>
               <p className="mt-1 text-xs leading-5">
-                当前 SSH 配置使用密码认证，但无交互探针尚未通过。远程 Codex 校验、SDK 安装和实际执行链路都必须保持阻断。
+                当前 SSH 配置使用密码认证，但测试连接尚未通过。远程 Codex 校验、SDK 安装和实际执行链路都必须保持阻断。
               </p>
               {selectedSshConfig?.password_probe_message && (
                 <p className="mt-2 text-xs">{selectedSshConfig.password_probe_message}</p>
@@ -643,7 +652,9 @@ export function SettingsPage() {
             <div className="space-y-1">
               <h3 className="text-sm font-medium">Codex SDK</h3>
               <p className="text-xs text-muted-foreground">
-                任务运行与一次性 AI 优先走 SDK，失败时自动回退到 `codex exec`
+                {isRemoteMode
+                  ? "SSH v1 当前固定使用远程 codex exec；这里展示的是远程 SDK 安装状态与运行前检查。"
+                  : "任务运行与一次性 AI 优先走 SDK，失败时自动回退到 `codex exec`"}
               </p>
             </div>
             <span
@@ -1022,16 +1033,23 @@ export function SettingsPage() {
                 <div className="font-medium text-foreground">当前配置状态</div>
                 <div className="mt-1">主机：{selectedSshConfigSummary}</div>
                 <div className="mt-1">
-                  密码探测：
-                  {selectedSshConfig.password_probe_status
-                    ? ` ${selectedSshConfig.password_probe_status}`
+                  连接测试：
+                  {(selectedSshConfig.auth_type === "password"
+                    ? selectedSshConfig.password_probe_status
+                    : selectedSshConfig.last_check_status)
+                    ? ` ${selectedSshConfig.auth_type === "password"
+                      ? selectedSshConfig.password_probe_status
+                      : selectedSshConfig.last_check_status}`
                     : " 未检测"}
                 </div>
-                {selectedSshConfig.password_probe_message && (
-                  <div className="mt-1">{selectedSshConfig.password_probe_message}</div>
-                )}
-                {selectedSshConfig.last_check_message && (
-                  <div className="mt-1">{selectedSshConfig.last_check_message}</div>
+                {(selectedSshConfig.auth_type === "password"
+                  ? selectedSshConfig.password_probe_message
+                  : selectedSshConfig.last_check_message) && (
+                  <div className="mt-1">
+                    {selectedSshConfig.auth_type === "password"
+                      ? selectedSshConfig.password_probe_message
+                      : selectedSshConfig.last_check_message}
+                  </div>
                 )}
               </div>
             )}
@@ -1043,11 +1061,11 @@ export function SettingsPage() {
               </Button>
               <Button
                 variant="outline"
-                onClick={() => void handleRunPasswordProbe()}
-                disabled={sshFormLoading !== null || !selectedSshConfigId || selectedSshConfig?.auth_type !== "password"}
+                onClick={() => void handleTestConnection()}
+                disabled={sshFormLoading !== null || !selectedSshConfigId}
               >
                 {sshFormLoading === "probe" ? <Loader2 className="h-4 w-4 animate-spin" /> : <ServerCog className="h-4 w-4" />}
-                探测密码认证
+                测试连接
               </Button>
               <Button
                 variant="destructive"

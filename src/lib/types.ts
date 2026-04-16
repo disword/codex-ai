@@ -322,14 +322,7 @@ export interface SshPasswordProbeResult {
   checked_at: string;
 }
 
-export interface RemoteCodexHealthCheck extends CodexHealthCheck {
-  execution_target: "ssh";
-  ssh_config_id: string;
-  target_host_label: string | null;
-  password_probe_status: SshPasswordProbeStatus | null;
-  password_probe_message: string | null;
-  password_execution_allowed: boolean;
-}
+export type RemoteCodexHealthCheck = CodexHealthCheck;
 
 export interface CodexSdkInstallResult {
   sdk_installed: boolean;
@@ -339,11 +332,7 @@ export interface CodexSdkInstallResult {
   message: string;
 }
 
-export interface RemoteCodexSdkInstallResult extends CodexSdkInstallResult {
-  execution_target: "ssh";
-  ssh_config_id: string;
-  target_host_label: string | null;
-}
+export type RemoteCodexSdkInstallResult = CodexSdkInstallResult;
 
 export interface DatabaseBackupResult {
   source_path: string;

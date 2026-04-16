@@ -86,8 +86,11 @@ export function Header() {
 
   return (
     <header className="flex items-center justify-between h-14 px-6 border-b border-border bg-background">
-      <div className="flex flex-col gap-1">
+      <div className="flex items-center">
         <h1 className="text-lg font-semibold">{title}</h1>
+      </div>
+
+      <div className="flex items-center gap-4">
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-muted-foreground">{getEnvironmentModeLabel(environmentMode)}</span>
           <div className="inline-flex rounded-md border border-border bg-muted/30 p-0.5">
@@ -113,9 +116,6 @@ export function Header() {
             </Button>
           </div>
         </div>
-      </div>
-
-      <div className="flex items-center gap-4">
         {projects.length > 0 && (
           <Select
             value={currentProject?.id ?? ALL_PROJECTS_VALUE}

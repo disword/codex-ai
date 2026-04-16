@@ -4,6 +4,18 @@ import { select } from "@/lib/database";
 import { normalizeProject, projectMatchesEnvironment } from "@/lib/projects";
 import type { ActivityLog, EnvironmentMode, Project, Task } from "@/lib/types";
 
+const SSH_GLOBAL_ACTIVITY_ACTIONS = new Set([
+  "environment_mode_switched",
+  "ssh_config_created",
+  "ssh_config_updated",
+  "ssh_config_deleted",
+  "remote_codex_validated",
+  "remote_codex_verified",
+  "remote_sdk_installed",
+  "remote_session_artifact_limited",
+  "remote_artifact_capture_limited",
+]);
+
 interface DashboardStats {
   totalProjects: number;
   activeProjects: number;
@@ -51,6 +63,22 @@ async function loadProjects() {
 
 async function loadActivities() {
   return select<ActivityLog>(ACTIVITY_SELECT);
+}
+
+function matchesEnvironmentActivity(
+  activity: ActivityLog,
+  visibleProjectIds: Set<string>,
+  environmentMode: EnvironmentMode,
+) {
+  if (activity.project_id) {
+    return visibleProjectIds.has(activity.project_id);
+  }
+
+  if (environmentMode === "ssh") {
+    return SSH_GLOBAL_ACTIVITY_ACTIONS.has(activity.action);
+  }
+
+  return true;
 }
 
 export const useDashboardStore = create<DashboardStore>((set) => ({
@@ -122,7 +150,7 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
           return activity.project_id === projectId;
         }
 
-        return activity.project_id ? visibleProjectIds.has(activity.project_id) : environmentMode === "local";
+        return matchesEnvironmentActivity(activity, visibleProjectIds, environmentMode);
       });
 
       set({ recentActivities: activities.slice(0, limit) });
@@ -147,7 +175,7 @@ export const useDashboardStore = create<DashboardStore>((set) => ({
         return activity.project_id === projectId;
       }
 
-      return activity.project_id ? visibleProjectIds.has(activity.project_id) : environmentMode === "local";
+      return matchesEnvironmentActivity(activity, visibleProjectIds, environmentMode);
     });
 
     return {

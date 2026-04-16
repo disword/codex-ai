@@ -24,8 +24,8 @@ use crate::app::{
 };
 use crate::codex::{
     ensure_sdk_runtime_layout, inspect_sdk_runtime, load_codex_settings,
-    load_remote_codex_settings, new_codex_command, new_node_command,
-    resolve_codex_executable_path, sdk_bridge_script_path, CodexManager,
+    load_remote_codex_settings, new_codex_command, new_node_command, resolve_codex_executable_path,
+    sdk_bridge_script_path, CodexManager,
 };
 use crate::db::models::{
     CodexExit, CodexOutput, CodexSession, CodexSessionFileChangeDetailInput,
@@ -1059,7 +1059,9 @@ async fn resolve_one_shot_working_dir(
     if let Some(explicit_working_dir) = working_dir.map(str::trim).filter(|value| !value.is_empty())
     {
         if matches!(
-            task_context.as_ref().map(|context| context.execution_target.as_str()),
+            task_context
+                .as_ref()
+                .map(|context| context.execution_target.as_str()),
             Some(EXECUTION_TARGET_SSH)
         ) {
             return Ok(Some(normalize_runtime_path_string(explicit_working_dir)));
@@ -2855,18 +2857,22 @@ async fn run_ai_command_via_ssh_exec(
     model: &str,
     reasoning_effort: &str,
     working_dir: Option<&str>,
-    image_paths: &[String],
+    _image_paths: &[String],
 ) -> Result<String, String> {
     let ssh_config = fetch_ssh_config_record_by_id(&sqlite_pool(app).await?, ssh_config_id).await?;
     let run_cwd = working_dir
         .map(normalize_runtime_path_string)
         .ok_or_else(|| "SSH 一次性 AI 缺少远程工作目录".to_string())?;
-    let remote_command = build_one_shot_exec_args(model, reasoning_effort, Some(&run_cwd), image_paths)
+    // SSH v1 不承诺把本地图片路径同步到远端，因此这里不透传 --image，避免把本地路径错误交给远程主机。
+    let remote_command = build_one_shot_exec_args(model, reasoning_effort, Some(&run_cwd), &[])
         .into_iter()
         .map(|value| shell_escape_arg(&value))
         .collect::<Vec<_>>()
         .join(" ");
-    let remote_command = format!("sh -lc {}", shell_escape_arg(&format!("exec codex {remote_command}")));
+    let remote_command = format!(
+        "sh -lc {}",
+        shell_escape_arg(&format!("exec codex {remote_command}"))
+    );
     let (mut command, askpass_path) =
         build_ssh_command(app, &ssh_config, Some(&remote_command), true).await?;
     command
@@ -2995,7 +3001,11 @@ async fn run_ai_command(
     working_dir: Option<String>,
 ) -> Result<String, String> {
     let (image_paths, missing_image_paths) = collect_available_image_paths(image_paths);
-    let execution_context = match task_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+    let execution_context = match task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
         Some(task_id) => resolve_task_project_execution_context(app, task_id).await?,
         None => ExecutionContext {
             execution_target: EXECUTION_TARGET_LOCAL.to_string(),
@@ -3031,7 +3041,9 @@ async fn run_ai_command(
         one_shot_model = normalize_model(Some(&settings.one_shot_model)).to_string();
         one_shot_reasoning_effort =
             normalize_reasoning_effort(Some(&settings.one_shot_reasoning_effort)).to_string();
-        if execution_context.execution_target == EXECUTION_TARGET_LOCAL && settings.one_shot_sdk_enabled {
+        if execution_context.execution_target == EXECUTION_TARGET_LOCAL
+            && settings.one_shot_sdk_enabled
+        {
             let runtime = inspect_sdk_runtime(app, &settings).await;
             if runtime.one_shot_effective_provider == "sdk" {
                 match run_ai_command_via_sdk(

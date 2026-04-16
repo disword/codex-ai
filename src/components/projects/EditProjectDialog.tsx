@@ -17,6 +17,7 @@ import {
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
 import { RepoPathField } from "@/components/projects/RepoPathField";
+import { getProjectTypeLabel } from "@/lib/projects";
 import { getStatusLabel } from "@/lib/utils";
 
 interface EditProjectDialogProps {
@@ -120,7 +121,9 @@ export function EditProjectDialog({ open, onOpenChange, project }: EditProjectDi
               }}
             >
               <SelectTrigger className="mt-1">
-                <SelectValue />
+                <SelectValue>
+                  {(value) => getProjectTypeLabel(typeof value === "string" ? value as ProjectType : projectType)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="local">本地项目</SelectItem>

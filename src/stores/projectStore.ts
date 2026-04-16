@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import { select } from "@/lib/database";
+import { execute, select } from "@/lib/database";
 import {
   createProject as createProjectCommand,
   createSshConfig as createSshConfigCommand,
@@ -54,6 +54,21 @@ function persistSshConfigId(sshConfigId: string | null) {
     window.localStorage.setItem(SSH_CONFIG_STORAGE_KEY, sshConfigId);
   } else {
     window.localStorage.removeItem(SSH_CONFIG_STORAGE_KEY);
+  }
+}
+
+async function recordEnvironmentModeSwitch(environmentMode: EnvironmentMode) {
+  try {
+    await execute(
+      "INSERT INTO activity_logs (id, employee_id, action, details, task_id, project_id, created_at) VALUES (?1, NULL, ?2, ?3, NULL, NULL, datetime('now'))",
+      [
+        globalThis.crypto?.randomUUID?.() ?? `env-${Date.now()}`,
+        "environment_mode_switched",
+        environmentMode === "ssh" ? "切换到 SSH 模式" : "切换到本地模式",
+      ],
+    );
+  } catch (error) {
+    console.error("Failed to record environment mode switch:", error);
   }
 }
 
@@ -190,6 +205,7 @@ export const useProjectStore = create<ProjectStore>((set, get) => ({
 
   setEnvironmentMode: async (environmentMode) => {
     persistEnvironmentMode(environmentMode);
+    await recordEnvironmentModeSwitch(environmentMode);
 
     set((state) => {
       const filteredProjects = filterProjectsByMode(state.allProjects, environmentMode);
