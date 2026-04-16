@@ -136,6 +136,23 @@ export interface TaskExecutionChangeHistoryItem {
   changes: CodexSessionFileChange[];
 }
 
+export interface CodexSessionFileChangeDetail {
+  change: CodexSessionFileChange;
+  working_dir: string | null;
+  absolute_path: string | null;
+  previous_absolute_path: string | null;
+  before_status: "text" | "missing" | "binary" | "unavailable";
+  before_text: string | null;
+  before_truncated: boolean;
+  after_status: "text" | "missing" | "binary" | "unavailable";
+  after_text: string | null;
+  after_truncated: boolean;
+  diff_text: string | null;
+  diff_truncated: boolean;
+  snapshot_status: "ready" | "unavailable";
+  snapshot_message: string | null;
+}
+
 export interface CodexSessionLogLine {
   event_id: string;
   line: string;

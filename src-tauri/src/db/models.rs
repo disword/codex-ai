@@ -158,6 +158,21 @@ pub struct CodexSessionFileChange {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, FromRow)]
+pub struct CodexSessionFileChangeDetailRecord {
+    pub id: String,
+    pub change_id: String,
+    pub absolute_path: Option<String>,
+    pub previous_absolute_path: Option<String>,
+    pub before_status: String,
+    pub before_text: Option<String>,
+    pub before_truncated: i32,
+    pub after_status: String,
+    pub after_text: Option<String>,
+    pub after_truncated: i32,
+    pub created_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexHealthCheck {
     pub codex_available: bool,
@@ -241,6 +256,24 @@ pub struct TaskExecutionChangeHistoryItem {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CodexSessionFileChangeDetail {
+    pub change: CodexSessionFileChange,
+    pub working_dir: Option<String>,
+    pub absolute_path: Option<String>,
+    pub previous_absolute_path: Option<String>,
+    pub before_status: String,
+    pub before_text: Option<String>,
+    pub before_truncated: bool,
+    pub after_status: String,
+    pub after_text: Option<String>,
+    pub after_truncated: bool,
+    pub diff_text: Option<String>,
+    pub diff_truncated: bool,
+    pub snapshot_status: String,
+    pub snapshot_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CodexSessionLogLine {
     pub event_id: String,
     pub line: String,
@@ -297,6 +330,19 @@ pub struct CodexSessionFileChangeInput {
     pub change_type: String,
     pub capture_mode: String,
     pub previous_path: Option<String>,
+    pub detail: Option<CodexSessionFileChangeDetailInput>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CodexSessionFileChangeDetailInput {
+    pub absolute_path: Option<String>,
+    pub previous_absolute_path: Option<String>,
+    pub before_status: String,
+    pub before_text: Option<String>,
+    pub before_truncated: bool,
+    pub after_status: String,
+    pub after_text: Option<String>,
+    pub after_truncated: bool,
 }
 
 // ========== DTOs ==========

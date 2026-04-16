@@ -52,6 +52,7 @@ pub fn run() {
             app::get_codex_session_log_lines,
             app::get_task_latest_review,
             app::get_task_execution_change_history,
+            app::get_codex_session_file_change_detail,
             app::start_task_code_review,
             app::read_image_file,
             app::open_task_attachment,

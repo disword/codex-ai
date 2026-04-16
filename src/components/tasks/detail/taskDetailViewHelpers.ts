@@ -69,6 +69,28 @@ export function getExecutionChangeCaptureModeDescription(
   captureMode: TaskExecutionChangeHistoryItem["capture_mode"],
 ) {
   return captureMode === "sdk_event"
-    ? "当前列表仅表示本次 Codex 会话工具实际改动到的文件。"
-    : "当前列表基于 Git 工作区前后快照估算，可能混入其他并行任务改动。";
+    ? "当前列表表示本次 Codex 会话实际改动到的文件；若可查看详情，文本快照来自会话结束时保存的记录。"
+    : "当前列表基于 Git 工作区前后快照估算，可能混入其他并行任务改动；若可查看详情，文本快照来自那次估算结果保存时的预览。";
+}
+
+export function getExecutionSnapshotStatusLabel(status: "text" | "missing" | "binary" | "unavailable") {
+  switch (status) {
+    case "text":
+      return "已保存文本快照";
+    case "missing":
+      return "该侧不存在文件";
+    case "binary":
+      return "二进制文件，未保存文本";
+    case "unavailable":
+      return "无法读取文本快照";
+    default:
+      return status;
+  }
+}
+
+export function getExecutionDiffLineClassName(line: string) {
+  if (line.startsWith("@@")) return "text-amber-700";
+  if (line.startsWith("+") && !line.startsWith("+++")) return "text-emerald-700";
+  if (line.startsWith("-") && !line.startsWith("---")) return "text-red-700";
+  return "text-foreground";
 }

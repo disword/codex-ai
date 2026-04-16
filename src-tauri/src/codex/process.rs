@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader as StdBufReader};
+use std::io::{BufRead, BufReader as StdBufReader, Read};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -14,15 +14,18 @@ use tokio::time::sleep;
 
 use crate::app::{
     fetch_codex_session_by_id, insert_activity_log, insert_codex_session_event,
-    insert_codex_session_event_with_id, insert_codex_session_record, now_sqlite,
-    path_to_runtime_string, replace_codex_session_file_changes, sqlite_pool,
+    insert_codex_session_event_with_id, insert_codex_session_record, normalize_runtime_path_string,
+    now_sqlite, path_to_runtime_string, replace_codex_session_file_changes, sqlite_pool,
     update_codex_session_record, validate_project_repo_path, validate_runtime_working_dir,
 };
 use crate::codex::{
     ensure_sdk_runtime_layout, inspect_sdk_runtime, load_codex_settings, new_codex_command,
     new_node_command, resolve_codex_executable_path, sdk_bridge_script_path, CodexManager,
 };
-use crate::db::models::{CodexExit, CodexOutput, CodexSession, CodexSessionFileChangeInput};
+use crate::db::models::{
+    CodexExit, CodexOutput, CodexSession, CodexSessionFileChangeDetailInput,
+    CodexSessionFileChangeInput,
+};
 
 const SUPPORTED_MODELS: &[&str] = &["gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2"];
 const SUPPORTED_REASONING_EFFORTS: &[&str] = &["low", "medium", "high", "xhigh"];
@@ -32,6 +35,7 @@ const REVIEW_REPORT_START_TAG: &str = "<review_report>";
 const REVIEW_REPORT_END_TAG: &str = "</review_report>";
 const STOP_WAIT_POLL_MS: u64 = 50;
 const STOP_WAIT_MAX_ATTEMPTS: usize = 600;
+const FILE_CHANGE_TEXT_SNAPSHOT_BYTE_LIMIT: u64 = 256 * 1024;
 
 #[derive(Debug, Deserialize)]
 struct AiSubtasksPayload {
@@ -156,12 +160,49 @@ pub struct ExecutionChangeBaseline {
 pub(crate) type SdkFileChangeStore = Arc<Mutex<HashMap<String, CodexSessionFileChangeInput>>>;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+struct TextSnapshot {
+    status: TextSnapshotStatus,
+    text: Option<String>,
+    truncated: bool,
+}
+
+impl TextSnapshot {
+    fn missing() -> Self {
+        Self {
+            status: TextSnapshotStatus::Missing,
+            text: None,
+            truncated: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextSnapshotStatus {
+    Text,
+    Missing,
+    Binary,
+    Unavailable,
+}
+
+impl TextSnapshotStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            TextSnapshotStatus::Text => "text",
+            TextSnapshotStatus::Missing => "missing",
+            TextSnapshotStatus::Binary => "binary",
+            TextSnapshotStatus::Unavailable => "unavailable",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct WorkingTreeSnapshotEntry {
     path: String,
     previous_path: Option<String>,
     status_x: char,
     status_y: char,
     content_hash: Option<String>,
+    text_snapshot: TextSnapshot,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -239,6 +280,7 @@ fn upsert_sdk_file_change_event(store: &SdkFileChangeStore, event: SdkFileChange
                     .previous_path
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty()),
+                detail: None,
             },
         );
     }
@@ -288,6 +330,101 @@ fn hash_worktree_path(repo_path: &str, relative_path: &str) -> Result<Option<Str
     }
 }
 
+fn capture_text_snapshot_from_bytes(bytes: &[u8], truncated_hint: bool) -> TextSnapshot {
+    if bytes.contains(&0) {
+        return TextSnapshot {
+            status: TextSnapshotStatus::Binary,
+            text: None,
+            truncated: false,
+        };
+    }
+
+    let mut end = bytes.len();
+    while end > 0 && std::str::from_utf8(&bytes[..end]).is_err() {
+        end -= 1;
+    }
+
+    if end == 0 && !bytes.is_empty() {
+        return TextSnapshot {
+            status: TextSnapshotStatus::Binary,
+            text: None,
+            truncated: false,
+        };
+    }
+
+    match std::str::from_utf8(&bytes[..end]) {
+        Ok(text) => TextSnapshot {
+            status: TextSnapshotStatus::Text,
+            text: Some(text.to_string()),
+            truncated: truncated_hint || end < bytes.len(),
+        },
+        Err(_) => TextSnapshot {
+            status: TextSnapshotStatus::Binary,
+            text: None,
+            truncated: false,
+        },
+    }
+}
+
+fn capture_worktree_text_snapshot(repo_path: &str, relative_path: &str) -> TextSnapshot {
+    let target = Path::new(repo_path).join(relative_path);
+    let metadata = match fs::metadata(&target) {
+        Ok(metadata) => metadata,
+        Err(_) => return TextSnapshot::missing(),
+    };
+
+    if !metadata.is_file() {
+        return TextSnapshot {
+            status: TextSnapshotStatus::Unavailable,
+            text: None,
+            truncated: false,
+        };
+    }
+
+    let max_read = metadata
+        .len()
+        .min(FILE_CHANGE_TEXT_SNAPSHOT_BYTE_LIMIT.saturating_add(4)) as usize;
+    let file = match fs::File::open(&target) {
+        Ok(file) => file,
+        Err(_) => {
+            return TextSnapshot {
+                status: TextSnapshotStatus::Unavailable,
+                text: None,
+                truncated: false,
+            };
+        }
+    };
+    let mut buffer = Vec::with_capacity(max_read);
+    if file
+        .take(FILE_CHANGE_TEXT_SNAPSHOT_BYTE_LIMIT.saturating_add(4))
+        .read_to_end(&mut buffer)
+        .is_err()
+    {
+        return TextSnapshot {
+            status: TextSnapshotStatus::Unavailable,
+            text: None,
+            truncated: false,
+        };
+    }
+
+    capture_text_snapshot_from_bytes(
+        &buffer,
+        metadata.len() > FILE_CHANGE_TEXT_SNAPSHOT_BYTE_LIMIT,
+    )
+}
+
+fn capture_git_head_text_snapshot(repo_path: &str, relative_path: &str) -> TextSnapshot {
+    match run_git_bytes(repo_path, &["show", &format!("HEAD:{relative_path}")]) {
+        Ok(bytes) => capture_text_snapshot_from_bytes(
+            &bytes[..bytes
+                .len()
+                .min(FILE_CHANGE_TEXT_SNAPSHOT_BYTE_LIMIT.saturating_add(4) as usize)],
+            bytes.len() as u64 > FILE_CHANGE_TEXT_SNAPSHOT_BYTE_LIMIT,
+        ),
+        Err(_) => TextSnapshot::missing(),
+    }
+}
+
 fn should_read_previous_path(status_x: char, status_y: char) -> bool {
     matches!(status_x, 'R' | 'C') || matches!(status_y, 'R' | 'C')
 }
@@ -304,15 +441,27 @@ fn entry_is_added(entry: &WorkingTreeSnapshotEntry) -> bool {
     matches!(entry.status_x, 'A' | '?') || matches!(entry.status_y, 'A' | '?')
 }
 
+fn entries_have_same_change_identity(
+    left: &WorkingTreeSnapshotEntry,
+    right: &WorkingTreeSnapshotEntry,
+) -> bool {
+    left.path == right.path
+        && left.previous_path == right.previous_path
+        && left.status_x == right.status_x
+        && left.status_y == right.status_y
+        && left.content_hash == right.content_hash
+}
+
 fn capture_execution_change_baseline(repo_path: &str) -> Result<ExecutionChangeBaseline, String> {
     Ok(ExecutionChangeBaseline {
         repo_path: repo_path.to_string(),
-        entries: collect_working_tree_snapshot_entries(repo_path)?,
+        entries: collect_working_tree_snapshot_entries(repo_path, true)?,
     })
 }
 
 fn collect_working_tree_snapshot_entries(
     repo_path: &str,
+    capture_text_snapshots: bool,
 ) -> Result<HashMap<String, WorkingTreeSnapshotEntry>, String> {
     let output = run_git_bytes(
         repo_path,
@@ -350,6 +499,11 @@ fn collect_working_tree_snapshot_entries(
             None
         };
         let content_hash = hash_worktree_path(repo_path, &path)?;
+        let text_snapshot = if capture_text_snapshots {
+            capture_worktree_text_snapshot(repo_path, &path)
+        } else {
+            TextSnapshot::missing()
+        };
 
         entries.insert(
             path.clone(),
@@ -359,6 +513,7 @@ fn collect_working_tree_snapshot_entries(
                 status_x,
                 status_y,
                 content_hash,
+                text_snapshot,
             },
         );
     }
@@ -389,13 +544,109 @@ fn build_session_file_change(
         change_type: change_kind.as_str().to_string(),
         capture_mode: capture_mode.to_string(),
         previous_path,
+        detail: None,
     }
+}
+
+fn normalize_repo_relative_path_string(value: &str) -> String {
+    normalize_runtime_path_string(value)
+        .trim()
+        .trim_start_matches("./")
+        .replace('\\', "/")
+}
+
+fn normalize_session_change_path(repo_path: &str, value: &str) -> String {
+    let normalized = normalize_runtime_path_string(value).trim().to_string();
+    if normalized.is_empty() {
+        return normalized;
+    }
+
+    let repo_root = Path::new(repo_path);
+    let candidate = Path::new(&normalized);
+    if candidate.is_absolute() {
+        if let Ok(relative) = candidate.strip_prefix(repo_root) {
+            return normalize_repo_relative_path_string(relative.to_string_lossy().as_ref());
+        }
+    }
+
+    normalize_repo_relative_path_string(&normalized)
+}
+
+fn normalize_session_file_change_paths(
+    repo_path: &str,
+    mut change: CodexSessionFileChangeInput,
+) -> CodexSessionFileChangeInput {
+    change.path = normalize_session_change_path(repo_path, &change.path);
+    change.previous_path = change
+        .previous_path
+        .as_deref()
+        .map(|value| normalize_session_change_path(repo_path, value))
+        .filter(|value| !value.is_empty());
+    change
+}
+
+fn build_session_file_change_detail(
+    repo_path: &str,
+    baseline_entries: &HashMap<String, WorkingTreeSnapshotEntry>,
+    change_kind: SessionFileChangeKind,
+    path: &str,
+    previous_path: Option<&str>,
+) -> CodexSessionFileChangeDetailInput {
+    let before_path = previous_path.unwrap_or(path);
+    let before_snapshot = if change_kind == SessionFileChangeKind::Added {
+        TextSnapshot::missing()
+    } else if let Some(entry) = baseline_entries.get(before_path) {
+        entry.text_snapshot.clone()
+    } else {
+        capture_git_head_text_snapshot(repo_path, before_path)
+    };
+
+    let after_snapshot = if change_kind == SessionFileChangeKind::Deleted {
+        TextSnapshot::missing()
+    } else {
+        capture_worktree_text_snapshot(repo_path, path)
+    };
+
+    CodexSessionFileChangeDetailInput {
+        absolute_path: Some(path_to_runtime_string(&Path::new(repo_path).join(path))),
+        previous_absolute_path: previous_path
+            .map(|value| path_to_runtime_string(&Path::new(repo_path).join(value))),
+        before_status: before_snapshot.status.as_str().to_string(),
+        before_text: before_snapshot.text,
+        before_truncated: before_snapshot.truncated,
+        after_status: after_snapshot.status.as_str().to_string(),
+        after_text: after_snapshot.text,
+        after_truncated: after_snapshot.truncated,
+    }
+}
+
+fn attach_session_file_change_details(
+    repo_path: &str,
+    baseline_entries: &HashMap<String, WorkingTreeSnapshotEntry>,
+    changes: Vec<CodexSessionFileChangeInput>,
+) -> Vec<CodexSessionFileChangeInput> {
+    changes
+        .into_iter()
+        .map(|change| {
+            let mut change = normalize_session_file_change_paths(repo_path, change);
+            let change_kind = normalize_session_file_change_kind(Some(change.change_type.as_str()))
+                .unwrap_or(SessionFileChangeKind::Modified);
+            change.detail = Some(build_session_file_change_detail(
+                repo_path,
+                baseline_entries,
+                change_kind,
+                &change.path,
+                change.previous_path.as_deref(),
+            ));
+            change
+        })
+        .collect()
 }
 
 fn compute_execution_session_file_changes(
     baseline: &ExecutionChangeBaseline,
 ) -> Result<Vec<CodexSessionFileChangeInput>, String> {
-    let end_entries = collect_working_tree_snapshot_entries(&baseline.repo_path)?;
+    let end_entries = collect_working_tree_snapshot_entries(&baseline.repo_path, false)?;
     compute_execution_session_file_changes_from_entries(
         &baseline.repo_path,
         &baseline.entries,
@@ -441,7 +692,7 @@ fn compute_execution_session_file_changes_from_entries(
             }
             Some(baseline_entry) => {
                 consumed_baseline.insert(path.clone());
-                if baseline_entry == entry {
+                if entries_have_same_change_identity(baseline_entry, entry) {
                     continue;
                 }
 
@@ -497,7 +748,11 @@ fn compute_execution_session_file_changes_from_entries(
         ));
     }
 
-    Ok(changes)
+    Ok(attach_session_file_change_details(
+        repo_path,
+        baseline_entries,
+        changes,
+    ))
 }
 
 fn extract_session_id_from_output(line: &str) -> Option<String> {
@@ -868,7 +1123,15 @@ async fn persist_execution_change_history(
                     let guard = store.lock().unwrap();
                     let mut values = guard.values().cloned().collect::<Vec<_>>();
                     values.sort_by(|left, right| left.path.cmp(&right.path));
-                    values
+                    if let Some(execution_change_baseline) = execution_change_baseline {
+                        attach_session_file_change_details(
+                            &execution_change_baseline.repo_path,
+                            &execution_change_baseline.entries,
+                            values,
+                        )
+                    } else {
+                        values
+                    }
                 })
                 .unwrap_or_default(),
             CodexExecutionProvider::Cli => {
@@ -913,13 +1176,12 @@ async fn finalize_stale_process_slot(
         return;
     }
 
-    let final_status = if current.status == "stopping" {
-        "exited"
-    } else if exit_code == Some(0) && error_message.is_none() {
-        "exited"
-    } else {
-        "failed"
-    };
+    let final_status =
+        if current.status == "stopping" || (exit_code == Some(0) && error_message.is_none()) {
+            "exited"
+        } else {
+            "failed"
+        };
     let ended_at = now_sqlite();
     let _ = update_codex_session_record(
         app,
@@ -1262,19 +1524,18 @@ pub async fn start_codex(
             return Err(error);
         }
     };
-    let execution_change_baseline =
-        if session_kind == CodexSessionKind::Execution && provider == CodexExecutionProvider::Cli {
-            match capture_execution_change_baseline(&run_cwd) {
-                Ok(baseline) => Some(baseline),
-                Err(error) => {
-                    insert_codex_session_event(
-                        &pool,
-                        &session_record.id,
-                        "session_file_changes_baseline_failed",
-                        Some(&error),
-                    )
-                    .await?;
-                    let _ = app.emit(
+    let execution_change_baseline = if session_kind == CodexSessionKind::Execution {
+        match capture_execution_change_baseline(&run_cwd) {
+            Ok(baseline) => Some(baseline),
+            Err(error) => {
+                insert_codex_session_event(
+                    &pool,
+                    &session_record.id,
+                    "session_file_changes_baseline_failed",
+                    Some(&error),
+                )
+                .await?;
+                let _ = app.emit(
                         "codex-stdout",
                         CodexOutput {
                             employee_id: employee_id.clone(),
@@ -1283,16 +1544,16 @@ pub async fn start_codex(
                             session_record_id: session_record.id.clone(),
                             session_event_id: None,
                             line: format!(
-                                "[WARN] CLI 修改文件基线采集失败，将跳过本次 Git 回退记录: {error}"
+                                "[WARN] 执行会话文件基线采集失败，文件详情将退化为最佳努力快照: {error}"
                             ),
                         },
                     );
-                    None
-                }
+                None
             }
-        } else {
-            None
-        };
+        }
+    } else {
+        None
+    };
 
     configure_process_group(&mut cmd);
 
@@ -2477,12 +2738,15 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::{
-        build_ai_generate_plan_prompt, build_one_shot_exec_args, build_session_exec_args,
-        compose_codex_prompt, compute_execution_session_file_changes_from_entries,
-        extract_session_id_from_output, format_session_prompt_log, hash_worktree_path,
+        attach_session_file_change_details, build_ai_generate_plan_prompt,
+        build_one_shot_exec_args, build_session_exec_args, compose_codex_prompt,
+        compute_execution_session_file_changes_from_entries, extract_session_id_from_output,
+        format_session_prompt_log, hash_worktree_path, normalize_session_file_change_paths,
         parse_ai_subtasks_response, parse_sdk_bridge_output, parse_sdk_file_change_event,
-        sdk_codex_path_override_allowed_for_os, CodexExecutionProvider, WorkingTreeSnapshotEntry,
+        sdk_codex_path_override_allowed_for_os, CodexExecutionProvider, TextSnapshot,
+        WorkingTreeSnapshotEntry,
     };
+    use crate::db::models::CodexSessionFileChangeInput;
 
     fn snapshot_entry(
         path: &str,
@@ -2497,6 +2761,7 @@ mod tests {
             status_x,
             status_y,
             content_hash: content_hash.map(ToOwned::to_owned),
+            text_snapshot: TextSnapshot::missing(),
         }
     }
 
@@ -2878,6 +3143,159 @@ mod tests {
         .expect("compute session file changes");
 
         assert!(changes.is_empty());
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn attaches_before_snapshot_for_newly_modified_tracked_file() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!(
+            "codex-session-detail-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(repo_root.join("src")).expect("create temp repo dir");
+        fs::write(repo_root.join("src/changed.ts"), "const value = 1;\n")
+            .expect("write initial file");
+
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_root)
+                .args(args)
+                .status()
+                .expect("run git command");
+            assert!(status.success(), "git {:?} should succeed", args);
+        };
+
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "codex@example.com"]);
+        run_git(&["config", "user.name", "Codex"]);
+        run_git(&["add", "src/changed.ts"]);
+        run_git(&["commit", "-q", "-m", "init"]);
+
+        fs::write(repo_root.join("src/changed.ts"), "const value = 2;\n")
+            .expect("write updated file");
+
+        let changes = attach_session_file_change_details(
+            repo_root.to_string_lossy().as_ref(),
+            &HashMap::new(),
+            vec![CodexSessionFileChangeInput {
+                path: "src/changed.ts".to_string(),
+                change_type: "modified".to_string(),
+                capture_mode: CodexExecutionProvider::Sdk.capture_mode().to_string(),
+                previous_path: None,
+                detail: None,
+            }],
+        );
+
+        let detail = changes[0]
+            .detail
+            .as_ref()
+            .expect("detail should be attached");
+        assert_eq!(detail.before_status, "text");
+        assert_eq!(detail.before_text.as_deref(), Some("const value = 1;\n"));
+        assert_eq!(detail.after_status, "text");
+        assert_eq!(detail.after_text.as_deref(), Some("const value = 2;\n"));
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn normalizes_sdk_absolute_paths_to_repo_relative_paths() {
+        let repo_root = std::env::temp_dir().join(format!(
+            "codex-session-normalize-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("system time")
+                .as_nanos()
+        ));
+        fs::create_dir_all(repo_root.join("src")).expect("create temp repo dir");
+
+        let change = normalize_session_file_change_paths(
+            repo_root.to_string_lossy().as_ref(),
+            CodexSessionFileChangeInput {
+                path: repo_root
+                    .join("src/changed.ts")
+                    .to_string_lossy()
+                    .to_string(),
+                change_type: "modified".to_string(),
+                capture_mode: CodexExecutionProvider::Sdk.capture_mode().to_string(),
+                previous_path: Some(repo_root.join("src/old.ts").to_string_lossy().to_string()),
+                detail: None,
+            },
+        );
+
+        assert_eq!(change.path, "src/changed.ts");
+        assert_eq!(change.previous_path.as_deref(), Some("src/old.ts"));
+
+        let _ = fs::remove_dir_all(&repo_root);
+    }
+
+    #[test]
+    fn attaches_before_snapshot_for_sdk_absolute_paths_inside_repo() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time")
+            .as_nanos();
+        let repo_root = std::env::temp_dir().join(format!(
+            "codex-session-absolute-detail-test-{}-{}",
+            std::process::id(),
+            unique
+        ));
+        fs::create_dir_all(repo_root.join("src")).expect("create temp repo dir");
+        fs::write(repo_root.join("src/changed.ts"), "const value = 1;\n")
+            .expect("write initial file");
+
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo_root)
+                .args(args)
+                .status()
+                .expect("run git command");
+            assert!(status.success(), "git {:?} should succeed", args);
+        };
+
+        run_git(&["init", "-q"]);
+        run_git(&["config", "user.email", "codex@example.com"]);
+        run_git(&["config", "user.name", "Codex"]);
+        run_git(&["add", "src/changed.ts"]);
+        run_git(&["commit", "-q", "-m", "init"]);
+
+        fs::write(repo_root.join("src/changed.ts"), "const value = 2;\n")
+            .expect("write updated file");
+
+        let absolute_path = repo_root
+            .join("src/changed.ts")
+            .to_string_lossy()
+            .to_string();
+        let changes = attach_session_file_change_details(
+            repo_root.to_string_lossy().as_ref(),
+            &HashMap::new(),
+            vec![CodexSessionFileChangeInput {
+                path: absolute_path,
+                change_type: "modified".to_string(),
+                capture_mode: CodexExecutionProvider::Sdk.capture_mode().to_string(),
+                previous_path: None,
+                detail: None,
+            }],
+        );
+
+        assert_eq!(changes[0].path, "src/changed.ts");
+        let detail = changes[0]
+            .detail
+            .as_ref()
+            .expect("detail should be attached");
+        assert_eq!(detail.before_status, "text");
+        assert_eq!(detail.before_text.as_deref(), Some("const value = 1;\n"));
+        assert_eq!(detail.after_status, "text");
+        assert_eq!(detail.after_text.as_deref(), Some("const value = 2;\n"));
+
         let _ = fs::remove_dir_all(&repo_root);
     }
 }

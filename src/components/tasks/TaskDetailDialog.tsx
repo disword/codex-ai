@@ -1,8 +1,16 @@
 import { useState, useEffect, useRef } from "react";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 
-import type { Task, TaskExecutionChangeHistoryItem, TaskLatestReview, TaskStatus } from "@/lib/types";
+import type {
+  CodexSessionFileChange,
+  CodexSessionFileChangeDetail,
+  Task,
+  TaskExecutionChangeHistoryItem,
+  TaskLatestReview,
+  TaskStatus,
+} from "@/lib/types";
 import {
+  getCodexSessionFileChangeDetail,
   getTaskExecutionChangeHistory,
   getTaskLatestReview,
   openTaskAttachment,
@@ -34,6 +42,7 @@ import { useTaskReviewActions } from "./hooks/useTaskReviewActions";
 import { useTaskAiActions } from "./hooks/useTaskAiActions";
 import { TaskOverviewPanel } from "./detail/TaskOverviewPanel";
 import { TaskExecutionPanel } from "./detail/TaskExecutionPanel";
+import { TaskExecutionChangeDetailDialog } from "./detail/TaskExecutionChangeDetailDialog";
 import { TaskReviewPanel } from "./detail/TaskReviewPanel";
 import { TaskAiPanel } from "./detail/TaskAiPanel";
 import { TaskCollaborationPanel } from "./detail/TaskCollaborationPanel";
@@ -99,6 +108,12 @@ export function TaskDetailDialog({
   const [executionChangeHistory, setExecutionChangeHistory] = useState<TaskExecutionChangeHistoryItem[]>([]);
   const [executionChangeHistoryLoading, setExecutionChangeHistoryLoading] = useState(false);
   const [executionChangeHistoryError, setExecutionChangeHistoryError] = useState<string | null>(null);
+  const [executionChangeDetailOpen, setExecutionChangeDetailOpen] = useState(false);
+  const [executionChangeDetailLoading, setExecutionChangeDetailLoading] = useState(false);
+  const [executionChangeDetailError, setExecutionChangeDetailError] = useState<string | null>(null);
+  const [selectedExecutionChange, setSelectedExecutionChange] = useState<CodexSessionFileChange | null>(null);
+  const [executionChangeDetail, setExecutionChangeDetail] = useState<CodexSessionFileChangeDetail | null>(null);
+  const executionChangeDetailRequestIdRef = useRef(0);
   const terminalRef = useRef<HTMLDivElement>(null);
   const aiLogRef = useRef<HTMLDivElement>(null);
   const assignee = assigneeId ? employees.find((employee) => employee.id === assigneeId) : undefined;
@@ -346,6 +361,45 @@ export function TaskDetailDialog({
     }
   };
 
+  const handleOpenExecutionChangeDetail = async (change: CodexSessionFileChange) => {
+    const requestId = executionChangeDetailRequestIdRef.current + 1;
+    executionChangeDetailRequestIdRef.current = requestId;
+    setSelectedExecutionChange(change);
+    setExecutionChangeDetail(null);
+    setExecutionChangeDetailOpen(true);
+    setExecutionChangeDetailLoading(true);
+    setExecutionChangeDetailError(null);
+    try {
+      const detail = await getCodexSessionFileChangeDetail(change.id);
+      if (executionChangeDetailRequestIdRef.current !== requestId) {
+        return;
+      }
+      setExecutionChangeDetail(detail);
+    } catch (error) {
+      if (executionChangeDetailRequestIdRef.current !== requestId) {
+        return;
+      }
+      console.error("Failed to load session file change detail:", error);
+      setExecutionChangeDetail(null);
+      setExecutionChangeDetailError(error instanceof Error ? error.message : String(error));
+    } finally {
+      if (executionChangeDetailRequestIdRef.current === requestId) {
+        setExecutionChangeDetailLoading(false);
+      }
+    }
+  };
+
+  const handleExecutionChangeDetailOpenChange = (nextOpen: boolean) => {
+    setExecutionChangeDetailOpen(nextOpen);
+    if (!nextOpen) {
+      executionChangeDetailRequestIdRef.current += 1;
+      setExecutionChangeDetailLoading(false);
+      setExecutionChangeDetailError(null);
+      setExecutionChangeDetail(null);
+      setSelectedExecutionChange(null);
+    }
+  };
+
   const buildReviewFixTaskDescription = (reviewReport: string) => {
     const sections = [
       "基于代码审核结果创建的修复任务。",
@@ -538,6 +592,7 @@ export function TaskDetailDialog({
                 onStop={() => void handleStopCodex()}
                 onClearOutput={() => clearTaskCodexOutput(task.id)}
                 onRefreshHistory={() => void loadExecutionChangeHistory()}
+                onOpenChangeDetail={(change) => void handleOpenExecutionChangeDetail(change)}
               />
             </TabsContent>
 
@@ -611,6 +666,28 @@ export function TaskDetailDialog({
           onConfirm={handleDelete}
         />
       )}
+      <TaskExecutionChangeDetailDialog
+        open={executionChangeDetailOpen}
+        loading={executionChangeDetailLoading}
+        error={executionChangeDetailError}
+        detail={executionChangeDetail ?? (selectedExecutionChange ? {
+          change: selectedExecutionChange,
+          working_dir: null,
+          absolute_path: null,
+          previous_absolute_path: null,
+          before_status: "missing",
+          before_text: null,
+          before_truncated: false,
+          after_status: "missing",
+          after_text: null,
+          after_truncated: false,
+          diff_text: null,
+          diff_truncated: false,
+          snapshot_status: "unavailable",
+          snapshot_message: null,
+        } : null)}
+        onOpenChange={handleExecutionChangeDetailOpenChange}
+      />
       {aiActions.insertDialogOpen && (
         <InsertPlanConfirmDialog
           open={aiActions.insertDialogOpen}

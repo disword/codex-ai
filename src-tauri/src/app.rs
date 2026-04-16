@@ -18,12 +18,12 @@ use uuid::Uuid;
 
 use crate::codex::{inspect_sdk_runtime, load_codex_settings, new_codex_command, CodexManager};
 use crate::db::models::{
-    CodexHealthCheck, CodexRuntimeStatus, CodexSessionFileChange, CodexSessionFileChangeInput,
-    CodexSessionListItem, CodexSessionLogLine, CodexSessionRecord, CodexSessionResumePreview,
-    Comment, CreateComment, CreateEmployee, CreateProject, CreateSubtask, CreateTask,
-    DatabaseBackupResult, DatabaseRestoreResult, Employee, EmployeeMetric, Project, Subtask, Task,
-    TaskAttachment, TaskExecutionChangeHistoryItem, TaskLatestReview, UpdateEmployee,
-    UpdateProject, UpdateTask,
+    CodexHealthCheck, CodexRuntimeStatus, CodexSessionFileChange, CodexSessionFileChangeDetail,
+    CodexSessionFileChangeDetailRecord, CodexSessionFileChangeInput, CodexSessionListItem,
+    CodexSessionLogLine, CodexSessionRecord, CodexSessionResumePreview, Comment, CreateComment,
+    CreateEmployee, CreateProject, CreateSubtask, CreateTask, DatabaseBackupResult,
+    DatabaseRestoreResult, Employee, EmployeeMetric, Project, Subtask, Task, TaskAttachment,
+    TaskExecutionChangeHistoryItem, TaskLatestReview, UpdateEmployee, UpdateProject, UpdateTask,
 };
 
 pub const DB_URL: &str = "sqlite:codex-ai.db";
@@ -31,6 +31,7 @@ const DB_FILE_NAME: &str = "codex-ai.db";
 const DB_AUTO_IMPORT_BACKUP_PREFIX: &str = "codex-ai.pre-import-backup";
 const SQLITE_DATETIME_FORMAT: &str = "%Y-%m-%d %H:%M:%S";
 const REVIEW_DIFF_CHAR_LIMIT: usize = 120_000;
+const FILE_CHANGE_DIFF_CHAR_LIMIT: usize = 120_000;
 const REVIEW_UNTRACKED_FILE_LIMIT: usize = 5;
 const REVIEW_UNTRACKED_FILE_SIZE_LIMIT: u64 = 16 * 1024;
 const REVIEW_UNTRACKED_TOTAL_CHAR_LIMIT: usize = 48_000;
@@ -1188,10 +1189,11 @@ pub(crate) async fn replace_codex_session_file_changes<R: Runtime>(
         .map_err(|error| format!("Failed to clear session file changes: {}", error))?;
 
     for change in changes {
+        let change_id = new_id();
         sqlx::query(
             "INSERT INTO codex_session_file_changes (id, session_id, path, change_type, capture_mode, previous_path) VALUES ($1, $2, $3, $4, $5, $6)",
         )
-        .bind(new_id())
+        .bind(&change_id)
         .bind(session_id)
         .bind(&change.path)
         .bind(&change.change_type)
@@ -1200,6 +1202,25 @@ pub(crate) async fn replace_codex_session_file_changes<R: Runtime>(
         .execute(&pool)
         .await
         .map_err(|error| format!("Failed to insert session file change: {}", error))?;
+
+        if let Some(detail) = &change.detail {
+            sqlx::query(
+                "INSERT INTO codex_session_file_change_details (id, change_id, absolute_path, previous_absolute_path, before_status, before_text, before_truncated, after_status, after_text, after_truncated) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+            )
+            .bind(new_id())
+            .bind(&change_id)
+            .bind(&detail.absolute_path)
+            .bind(&detail.previous_absolute_path)
+            .bind(&detail.before_status)
+            .bind(&detail.before_text)
+            .bind(if detail.before_truncated { 1 } else { 0 })
+            .bind(&detail.after_status)
+            .bind(&detail.after_text)
+            .bind(if detail.after_truncated { 1 } else { 0 })
+            .execute(&pool)
+            .await
+            .map_err(|error| format!("Failed to insert session file change detail: {}", error))?;
+        }
     }
 
     Ok(())
@@ -2211,6 +2232,211 @@ pub async fn get_task_execution_change_history<R: Runtime>(
     Ok(items)
 }
 
+fn build_file_change_diff_preview(
+    before_label: &str,
+    before_text: Option<&str>,
+    after_label: &str,
+    after_text: Option<&str>,
+) -> Result<(Option<String>, bool), String> {
+    if before_text.is_none() && after_text.is_none() {
+        return Ok((None, false));
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!("codex-ai-diff-{}", Uuid::new_v4()));
+    fs::create_dir_all(&temp_dir).map_err(|error| format!("创建 diff 临时目录失败: {}", error))?;
+    let before_file = temp_dir.join("before.txt");
+    let after_file = temp_dir.join("after.txt");
+
+    let write_result = (|| -> Result<(), String> {
+        fs::write(&before_file, before_text.unwrap_or(""))
+            .map_err(|error| format!("写入 diff 前镜像失败: {}", error))?;
+        fs::write(&after_file, after_text.unwrap_or(""))
+            .map_err(|error| format!("写入 diff 后镜像失败: {}", error))?;
+        Ok(())
+    })();
+
+    if let Err(error) = write_result {
+        let _ = fs::remove_dir_all(&temp_dir);
+        return Err(error);
+    }
+
+    let output = Command::new("git")
+        .current_dir(&temp_dir)
+        .args([
+            "diff",
+            "--no-index",
+            "--no-ext-diff",
+            "--unified=3",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--",
+            "before.txt",
+            "after.txt",
+        ])
+        .output()
+        .map_err(|error| format!("生成文件 diff 失败: {}", error))?;
+    let _ = fs::remove_dir_all(&temp_dir);
+
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+
+    let diff = rewrite_file_change_diff_labels(
+        &String::from_utf8_lossy(&output.stdout),
+        before_label,
+        after_label,
+    );
+    let trimmed = diff.trim();
+    if trimmed.is_empty() {
+        return Ok((None, false));
+    }
+
+    let (diff_text, diff_truncated) = truncate_review_text(trimmed, FILE_CHANGE_DIFF_CHAR_LIMIT);
+    Ok((Some(diff_text), diff_truncated))
+}
+
+fn file_change_diff_display_label(prefix: &str, label: &str) -> String {
+    if label == "/dev/null" {
+        label.to_string()
+    } else {
+        format!("{prefix}/{label}")
+    }
+}
+
+fn rewrite_file_change_diff_labels(diff: &str, before_label: &str, after_label: &str) -> String {
+    let before_display = file_change_diff_display_label("a", before_label);
+    let after_display = file_change_diff_display_label("b", after_label);
+
+    diff.lines()
+        .map(|line| {
+            if line == "diff --git a/before.txt b/after.txt" {
+                format!("diff --git {} {}", before_display, after_display)
+            } else if line == "--- a/before.txt" {
+                format!("--- {}", before_display)
+            } else if line == "+++ b/after.txt" {
+                format!("+++ {}", after_display)
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[tauri::command]
+pub async fn get_codex_session_file_change_detail<R: Runtime>(
+    app: AppHandle<R>,
+    change_id: String,
+) -> Result<CodexSessionFileChangeDetail, String> {
+    let pool = sqlite_pool(&app).await?;
+    let change = sqlx::query_as::<_, CodexSessionFileChange>(
+        "SELECT * FROM codex_session_file_changes WHERE id = $1",
+    )
+    .bind(&change_id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("Failed to fetch session file change: {}", error))?
+    .ok_or_else(|| "找不到对应的文件变更记录".to_string())?;
+    let session =
+        sqlx::query_as::<_, CodexSessionRecord>("SELECT * FROM codex_sessions WHERE id = $1")
+            .bind(&change.session_id)
+            .fetch_optional(&pool)
+            .await
+            .map_err(|error| {
+                format!(
+                    "Failed to fetch session record for change detail: {}",
+                    error
+                )
+            })?
+            .ok_or_else(|| "找不到对应的执行会话".to_string())?;
+    let detail = sqlx::query_as::<_, CodexSessionFileChangeDetailRecord>(
+        "SELECT * FROM codex_session_file_change_details WHERE change_id = $1",
+    )
+    .bind(&change.id)
+    .fetch_optional(&pool)
+    .await
+    .map_err(|error| format!("Failed to fetch session file change detail: {}", error))?;
+
+    let fallback_absolute_path = session
+        .working_dir
+        .as_ref()
+        .map(|dir| path_to_runtime_string(&Path::new(dir).join(&change.path)));
+    let fallback_previous_absolute_path = session
+        .working_dir
+        .as_ref()
+        .zip(change.previous_path.as_ref())
+        .map(|(dir, path)| path_to_runtime_string(&Path::new(dir).join(path)));
+
+    let Some(detail) = detail else {
+        return Ok(CodexSessionFileChangeDetail {
+            change,
+            working_dir: session.working_dir,
+            absolute_path: fallback_absolute_path,
+            previous_absolute_path: fallback_previous_absolute_path,
+            before_status: "missing".to_string(),
+            before_text: None,
+            before_truncated: false,
+            after_status: "missing".to_string(),
+            after_text: None,
+            after_truncated: false,
+            diff_text: None,
+            diff_truncated: false,
+            snapshot_status: "unavailable".to_string(),
+            snapshot_message: Some(
+                "该执行记录生成于旧版本，只保留了文件级变更，没有保存可预览的文本快照。"
+                    .to_string(),
+            ),
+        });
+    };
+
+    let before_label = if change.change_type == "added" {
+        "/dev/null"
+    } else {
+        change
+            .previous_path
+            .as_deref()
+            .unwrap_or(change.path.as_str())
+    };
+    let after_label = if change.change_type == "deleted" {
+        "/dev/null"
+    } else {
+        change.path.as_str()
+    };
+    let can_build_diff = (detail.before_status == "text" && detail.before_text.is_some())
+        || (detail.after_status == "text" && detail.after_text.is_some());
+    let (diff_text, raw_diff_truncated) = if can_build_diff {
+        build_file_change_diff_preview(
+            before_label,
+            detail.before_text.as_deref(),
+            after_label,
+            detail.after_text.as_deref(),
+        )?
+    } else {
+        (None, false)
+    };
+    let diff_truncated =
+        raw_diff_truncated || detail.before_truncated != 0 || detail.after_truncated != 0;
+
+    Ok(CodexSessionFileChangeDetail {
+        change,
+        working_dir: session.working_dir,
+        absolute_path: detail.absolute_path.or(fallback_absolute_path),
+        previous_absolute_path: detail
+            .previous_absolute_path
+            .or(fallback_previous_absolute_path),
+        before_status: detail.before_status,
+        before_text: detail.before_text,
+        before_truncated: detail.before_truncated != 0,
+        after_status: detail.after_status,
+        after_text: detail.after_text,
+        after_truncated: detail.after_truncated != 0,
+        diff_text,
+        diff_truncated,
+        snapshot_status: "ready".to_string(),
+        snapshot_message: None,
+    })
+}
+
 #[tauri::command]
 pub async fn start_task_code_review(
     app: AppHandle,
@@ -3063,7 +3289,8 @@ mod tests {
 
     use super::{
         ensure_statement_terminated, normalize_runtime_path_string, resolve_session_resume_state,
-        sanitize_sql_backup_script, validate_project_repo_path, validate_runtime_working_dir,
+        rewrite_file_change_diff_labels, sanitize_sql_backup_script, validate_project_repo_path,
+        validate_runtime_working_dir,
     };
 
     #[test]
@@ -3133,6 +3360,44 @@ mod tests {
             "CREATE TABLE demo(id INTEGER);"
         );
         assert_eq!(ensure_statement_terminated("   "), "");
+    }
+
+    #[test]
+    fn rewrite_file_change_diff_labels_only_updates_headers() {
+        let raw = concat!(
+            "diff --git a/before.txt b/after.txt\n",
+            "index 1111111..2222222 100644\n",
+            "--- a/before.txt\n",
+            "+++ b/after.txt\n",
+            "@@ -1 +1 @@\n",
+            "-const path = \"a/before.txt\";\n",
+            "+const path = \"b/after.txt\";\n",
+        );
+
+        let rewritten = rewrite_file_change_diff_labels(raw, "src/old.ts", "src/new.ts");
+
+        assert!(rewritten.contains("diff --git a/src/old.ts b/src/new.ts"));
+        assert!(rewritten.contains("--- a/src/old.ts"));
+        assert!(rewritten.contains("+++ b/src/new.ts"));
+        assert!(rewritten.contains("-const path = \"a/before.txt\";"));
+        assert!(rewritten.contains("+const path = \"b/after.txt\";"));
+    }
+
+    #[test]
+    fn rewrite_file_change_diff_labels_keeps_dev_null_unprefixed() {
+        let raw = concat!(
+            "diff --git a/before.txt b/after.txt\n",
+            "--- a/before.txt\n",
+            "+++ b/after.txt\n",
+        );
+
+        let rewritten = rewrite_file_change_diff_labels(raw, "/dev/null", "src/new.ts");
+
+        assert!(rewritten.contains("diff --git /dev/null b/src/new.ts"));
+        assert!(rewritten.contains("--- /dev/null"));
+        assert!(rewritten.contains("+++ b/src/new.ts"));
+        assert!(!rewritten.contains("a//dev/null"));
+        assert!(!rewritten.contains("b//dev/null"));
     }
 
     #[test]

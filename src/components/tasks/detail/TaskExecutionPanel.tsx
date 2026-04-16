@@ -1,7 +1,7 @@
 import type { RefObject } from "react";
 import { Eraser, Loader2, Play, Square } from "lucide-react";
 
-import type { TaskExecutionChangeHistoryItem } from "@/lib/types";
+import type { CodexSessionFileChange, TaskExecutionChangeHistoryItem } from "@/lib/types";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   getExecutionChangeCaptureModeDescription,
@@ -25,6 +25,7 @@ interface TaskExecutionPanelProps {
   onStop: () => void;
   onClearOutput: () => void;
   onRefreshHistory: () => void;
+  onOpenChangeDetail: (change: CodexSessionFileChange) => void;
 }
 
 export function TaskExecutionPanel({
@@ -40,6 +41,7 @@ export function TaskExecutionPanel({
   onStop,
   onClearOutput,
   onRefreshHistory,
+  onOpenChangeDetail,
 }: TaskExecutionPanelProps) {
   return (
     <div className="space-y-4">
@@ -153,9 +155,11 @@ export function TaskExecutionPanel({
                 {item.changes.length > 0 ? (
                   <div className="mt-3 space-y-2">
                     {item.changes.map((change) => (
-                      <div
+                      <button
+                        type="button"
                         key={change.id}
-                        className="flex flex-col gap-1 rounded-md border border-border/60 bg-background px-3 py-2 text-xs"
+                        onClick={() => onOpenChangeDetail(change)}
+                        className="flex w-full flex-col gap-1 rounded-md border border-border/60 bg-background px-3 py-2 text-left text-xs transition-colors hover:border-primary/40 hover:bg-muted/30"
                       >
                         <div className="flex flex-wrap items-center gap-2">
                           <span
@@ -170,7 +174,10 @@ export function TaskExecutionPanel({
                             原路径：<span className="font-mono break-all">{change.previous_path}</span>
                           </div>
                         )}
-                      </div>
+                        <div className="text-[11px] text-primary">
+                          点击查看该次会话保存的 diff / 内容快照
+                        </div>
+                      </button>
                     ))}
                   </div>
                 ) : (

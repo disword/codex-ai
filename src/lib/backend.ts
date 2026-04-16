@@ -7,6 +7,7 @@ import type {
   CodexSessionLogLine,
   CodexSessionListItem,
   CodexSessionResumePreview,
+  CodexSessionFileChangeDetail,
   DatabaseBackupResult,
   DatabaseRestoreResult,
   Comment,
@@ -133,6 +134,12 @@ export async function getTaskExecutionChangeHistory(
   taskId: string,
 ): Promise<TaskExecutionChangeHistoryItem[]> {
   return invoke("get_task_execution_change_history", { taskId });
+}
+
+export async function getCodexSessionFileChangeDetail(
+  changeId: string,
+): Promise<CodexSessionFileChangeDetail> {
+  return invoke("get_codex_session_file_change_detail", { changeId });
 }
 
 export async function startTaskCodeReview(taskId: string): Promise<void> {
