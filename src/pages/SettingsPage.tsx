@@ -30,8 +30,7 @@ import {
   type CodexSettings,
   type ReasoningEffort,
 } from "@/lib/types";
-
-type ThemeMode = "light" | "dark" | "system";
+import { applyTheme, getThemePreference, type ThemeMode } from "@/lib/theme";
 
 const DATABASE_FILE_FILTERS = [
   { name: "SQL 备份", extensions: ["sql"] },
@@ -40,23 +39,6 @@ const DATABASE_FILE_FILTERS = [
 const isTauriRuntime =
   typeof window !== "undefined" &&
   typeof (window as typeof window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== "undefined";
-
-function getThemePreference(): ThemeMode {
-  const stored = localStorage.getItem("theme-mode");
-  if (stored === "light" || stored === "dark" || stored === "system") return stored;
-  return "system";
-}
-
-function applyTheme(mode: ThemeMode) {
-  let isDark: boolean;
-  if (mode === "system") {
-    isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-  } else {
-    isDark = mode === "dark";
-  }
-  document.documentElement.classList.toggle("dark", isDark);
-  localStorage.setItem("theme", isDark ? "dark" : "light");
-}
 
 function formatBackupTimestamp(date = new Date()) {
   const year = date.getFullYear();
@@ -127,7 +109,6 @@ export function SettingsPage() {
 
   useEffect(() => {
     applyTheme(themeMode);
-    localStorage.setItem("theme-mode", themeMode);
   }, [themeMode]);
 
   useEffect(() => {

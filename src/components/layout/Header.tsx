@@ -3,6 +3,13 @@ import { Moon, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useProjectStore } from "@/stores/projectStore";
 import {
+  applyTheme,
+  getThemePreference,
+  isDarkThemeMode,
+  THEME_CHANGE_EVENT,
+  type ThemeMode,
+} from "@/lib/theme";
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -20,33 +27,34 @@ const pageTitles: Record<string, string> = {
   "/settings": "系统设置",
 };
 
-function getThemePreference(): boolean {
-  const stored = localStorage.getItem("theme");
-  if (stored) return stored === "dark";
-  return window.matchMedia("(prefers-color-scheme: dark)").matches;
-}
-
 export function Header() {
   const location = useLocation();
   const title = pageTitles[location.pathname] || "AI员工协作系统";
   const { projects, currentProject, setCurrentProject, fetchProjects } = useProjectStore();
-  const [dark, setDark] = useState(false);
+  const [themeMode, setThemeMode] = useState<ThemeMode>(getThemePreference);
+  const dark = isDarkThemeMode(themeMode);
 
   useEffect(() => {
     fetchProjects();
   }, [fetchProjects]);
 
   useEffect(() => {
-    const isDark = getThemePreference();
-    setDark(isDark);
-    document.documentElement.classList.toggle("dark", isDark);
+    const nextMode = getThemePreference();
+    setThemeMode(nextMode);
+    applyTheme(nextMode);
+
+    const handleThemeChange = () => {
+      setThemeMode(getThemePreference());
+    };
+
+    window.addEventListener(THEME_CHANGE_EVENT, handleThemeChange);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, handleThemeChange);
   }, []);
 
   const toggleTheme = () => {
-    const next = !dark;
-    setDark(next);
-    document.documentElement.classList.toggle("dark", next);
-    localStorage.setItem("theme", next ? "dark" : "light");
+    const nextMode: ThemeMode = dark ? "light" : "dark";
+    setThemeMode(nextMode);
+    applyTheme(nextMode);
   };
 
   return (
