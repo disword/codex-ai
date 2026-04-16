@@ -32,16 +32,16 @@ export function Sidebar() {
         collapsed ? "w-16" : "w-56"
       )}
     >
-      <div className="flex items-center gap-2 px-4 h-14 border-b border-sidebar-border">
+      <div className="flex h-14 items-center gap-2 border-b border-black/8 px-4 text-zinc-900 dark:border-white/10 dark:text-white">
         <Bot className="h-6 w-6 text-sidebar-primary shrink-0" />
         {!collapsed && (
-          <span className="font-semibold text-sm text-foreground truncate">
+          <span className="truncate text-sm font-semibold tracking-tight text-zinc-900 dark:text-white">
             AI员工协作系统
           </span>
         )}
       </div>
 
-      <nav className="flex-1 py-2 space-y-1 px-2">
+      <nav className="flex-1 space-y-1 px-2 py-2">
         {navItems.map((item) => (
           <NavLink
             key={item.to}
@@ -51,8 +51,8 @@ export function Sidebar() {
               cn(
                 "flex items-center gap-3 px-3 py-2 rounded-md text-sm transition-colors",
                 isActive
-                  ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
-                  : "text-muted-foreground hover:bg-sidebar-accent/50 hover:text-sidebar-foreground"
+                  ? "bg-zinc-900 text-white font-medium dark:bg-white dark:text-zinc-900"
+                  : "text-zinc-600 hover:bg-black/5 hover:text-zinc-900 dark:text-white/72 dark:hover:bg-white/8 dark:hover:text-white"
               )
             }
           >
@@ -62,10 +62,10 @@ export function Sidebar() {
         ))}
       </nav>
 
-      <div className="p-2 border-t border-sidebar-border">
+      <div className="border-t border-black/8 p-2 dark:border-white/10">
         <button
           onClick={() => setCollapsed(!collapsed)}
-          className="flex items-center justify-center w-full px-3 py-2 rounded-md text-sidebar-foreground hover:bg-sidebar-accent/50 transition-colors"
+          className="flex w-full items-center justify-center rounded-md px-3 py-2 text-zinc-600 transition-colors hover:bg-black/5 hover:text-zinc-900 dark:text-white/72 dark:hover:bg-white/8 dark:hover:text-white"
         >
           {collapsed ? (
             <ChevronRight className="h-4 w-4" />
