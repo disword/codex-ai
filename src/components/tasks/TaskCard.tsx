@@ -2,10 +2,10 @@ import { useEffect, useState } from "react";
 import { createPortal } from "react-dom";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import type { Task } from "@/lib/types";
+import type { CodexSessionKind, Task } from "@/lib/types";
 import { getPriorityLabel, getPriorityColor, formatDate } from "@/lib/utils";
 import { buildTaskExecutionInput } from "@/lib/taskPrompt";
-import { Clock, FolderKanban, GripVertical, MessageSquarePlus, Play, ScrollText, Square, Trash2 } from "lucide-react";
+import { Clock, FolderKanban, GripVertical, Loader2, MessageSquarePlus, Play, ScrollText, Square, Trash2 } from "lucide-react";
 import { ContinueConversationDialog } from "./ContinueConversationDialog";
 import { TaskDetailDialog } from "./TaskDetailDialog";
 import { DeleteTaskDialog } from "./DeleteTaskDialog";
@@ -19,7 +19,7 @@ import { useTaskReviewActions } from "./hooks/useTaskReviewActions";
 interface TaskCardProps {
   task: Task;
   isOverlay?: boolean;
-  onOpenLog?: (taskId: string) => void;
+  onOpenLog?: (taskId: string, sessionKind?: CodexSessionKind) => void;
 }
 
 export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
@@ -71,6 +71,8 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
     status: task.status,
   });
   const isRunning = executionActions.isRunning;
+  const isReviewRunning = reviewActions.isRunning;
+  const isReviewTask = task.status === "review";
   const isActionLoading = executionActions.loading !== null || reviewActions.loading;
 
   const {
@@ -114,7 +116,7 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
   const handleRun = async (e?: React.MouseEvent) => {
     e?.stopPropagation();
     setContextMenu(null);
-    onOpenLog?.(task.id);
+    onOpenLog?.(task.id, "execution");
     await executionActions.runTask();
   };
 
@@ -138,10 +140,13 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
     }
   };
 
-  const handleReviewCode = async () => {
+  const handleReviewCode = async (e?: React.MouseEvent) => {
+    e?.stopPropagation();
+
     if (task.status !== "review" || !task.reviewer_id) return;
 
     setContextMenu(null);
+    onOpenLog?.(task.id, "review");
     await reviewActions.startReview();
   };
 
@@ -163,7 +168,7 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
 
   const openLogDialog = () => {
     setContextMenu(null);
-    onOpenLog?.(task.id);
+    onOpenLog?.(task.id, task.status === "review" ? "review" : "execution");
   };
 
   const openContinueDialog = () => {
@@ -244,30 +249,49 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
         {/* Run/Stop Codex */}
         {!isOverlay && (
           <div className="flex items-center gap-1 mt-2 pt-2 border-t border-border/50">
-            {task.assignee_id ? (
-              isRunning ? (
+            {isRunning ? (
+              <button
+                onClick={handleStop}
+                disabled={isActionLoading}
+                className="flex items-center gap-1 px-2 py-0.5 text-xs bg-red-600 text-white rounded hover:bg-red-700 transition-colors disabled:opacity-50"
+              >
+                {executionActions.loading === "stop" ? (
+                  <Square className="h-3 w-3" />
+                ) : (
+                  <span className="inline-block w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                )}
+                停止
+              </button>
+            ) : isReviewTask ? (
+              task.reviewer_id ? (
                 <button
-                  onClick={handleStop}
-                  disabled={isActionLoading}
-                  className="flex items-center gap-1 px-2 py-0.5 text-xs bg-red-600 text-white rounded hover:bg-red-700 transition-colors disabled:opacity-50"
+                  onClick={(e) => void handleReviewCode(e)}
+                  disabled={isActionLoading || isReviewRunning}
+                  title={`由 ${reviewer?.name ?? "审查员"} 发起代码审核`}
+                  className="flex items-center gap-1 px-2 py-0.5 text-xs bg-amber-500 text-black rounded hover:bg-amber-400 transition-colors disabled:opacity-50"
                 >
-                  {executionActions.loading === "stop" ? (
-                    <Square className="h-3 w-3" />
+                  {reviewActions.loading || isReviewRunning ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
                   ) : (
-                    <span className="inline-block w-1.5 h-1.5 rounded-full bg-white animate-pulse" />
+                    <ScrollText className="h-3 w-3" />
                   )}
-                  停止
+                  {isReviewRunning ? "审核中" : "审核"}
                 </button>
               ) : (
-                <button
-                  onClick={handleRun}
-                  disabled={isActionLoading}
-                  className="flex items-center gap-1 px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 transition-colors disabled:opacity-50"
-                >
-                  <Play className="h-3 w-3" />
-                  运行
-                </button>
+                <span className="text-xs text-muted-foreground/50" title="请先指定审查员">
+                  <ScrollText className="h-3 w-3 inline mr-0.5" />
+                  未指定审查员
+                </span>
               )
+            ) : task.assignee_id ? (
+              <button
+                onClick={handleRun}
+                disabled={isActionLoading}
+                className="flex items-center gap-1 px-2 py-0.5 text-xs bg-green-600 text-white rounded hover:bg-green-700 transition-colors disabled:opacity-50"
+              >
+                <Play className="h-3 w-3" />
+                运行
+              </button>
             ) : (
               <span className="text-xs text-muted-foreground/50" title="请先指派员工">
                 <Play className="h-3 w-3 inline mr-0.5" />
@@ -303,16 +327,41 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
             onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => e.stopPropagation()}
           >
-            <button
-              type="button"
-              role="menuitem"
-              onClick={() => void (isRunning ? handleStop() : handleRun())}
-              disabled={!task.assignee_id || isActionLoading}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-            >
-              {isRunning ? <Square className="h-4 w-4" /> : <Play className="h-4 w-4" />}
-              {isRunning ? "停止" : "运行"}
-            </button>
+            {isRunning ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void handleStop()}
+                disabled={isActionLoading}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                <Square className="h-4 w-4" />
+                停止
+              </button>
+            ) : isReviewTask ? (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void handleReviewCode()}
+                disabled={!task.reviewer_id || isActionLoading || isReviewRunning}
+                title={task.reviewer_id ? `由 ${reviewer?.name ?? "审查员"} 发起代码审核` : "请先指定审查员"}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                <ScrollText className="h-4 w-4" />
+                {isReviewRunning ? "审核中" : "审核代码"}
+              </button>
+            ) : (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void handleRun()}
+                disabled={!task.assignee_id || isActionLoading}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                <Play className="h-4 w-4" />
+                运行
+              </button>
+            )}
             {task.last_codex_session_id && (
               <>
                 <div className="my-1 h-px bg-border" />
@@ -325,22 +374,6 @@ export function TaskCard({ task, isOverlay, onOpenLog }: TaskCardProps) {
                 >
                   <MessageSquarePlus className="h-4 w-4" />
                   继续对话
-                </button>
-              </>
-            )}
-            {task.status === "review" && (
-              <>
-                <div className="my-1 h-px bg-border" />
-                <button
-                  type="button"
-                  role="menuitem"
-                  onClick={() => void handleReviewCode()}
-                  disabled={!task.reviewer_id || isActionLoading}
-                  title={task.reviewer_id ? `由 ${reviewer?.name ?? "审查员"} 发起代码审核` : "请先指定审查员"}
-                  className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
-                >
-                  <ScrollText className="h-4 w-4" />
-                  审核代码
                 </button>
               </>
             )}

@@ -64,7 +64,6 @@ export function TaskDetailDialog({
     updateTask,
     deleteTask,
     addComment,
-    updateTaskStatus,
     fetchAttachments,
     fetchSubtasks,
     addTaskAttachments,
@@ -113,6 +112,7 @@ export function TaskDetailDialog({
   const [executionChangeDetailError, setExecutionChangeDetailError] = useState<string | null>(null);
   const [selectedExecutionChange, setSelectedExecutionChange] = useState<CodexSessionFileChange | null>(null);
   const [executionChangeDetail, setExecutionChangeDetail] = useState<CodexSessionFileChangeDetail | null>(null);
+  const latestReviewRequestIdRef = useRef(0);
   const executionChangeDetailRequestIdRef = useRef(0);
   const terminalRef = useRef<HTMLDivElement>(null);
   const aiLogRef = useRef<HTMLDivElement>(null);
@@ -149,6 +149,9 @@ export function TaskDetailDialog({
     reviewerId,
     status,
     onStarted: () => {
+      setReviewError(null);
+      setReviewNotice(null);
+      setLatestReview(null);
       void loadLatestReview();
     },
     onError: (message) => {
@@ -192,8 +195,8 @@ export function TaskDetailDialog({
       setSaveError(null);
       setReviewError(null);
       setReviewNotice(null);
-      void loadExecutionChangeHistory();
       void loadLatestReview();
+      void loadExecutionChangeHistory();
     }
   }, [fetchAttachments, fetchEmployees, open, task]);
 
@@ -204,19 +207,22 @@ export function TaskDetailDialog({
   }, [open]);
 
   useEffect(() => {
-    if (open) {
-      setAttachmentLoading(false);
-      setDeletingAttachmentId(null);
-      setLatestReview(null);
-      setLatestReviewLoading(false);
-      setExecutionChangeHistory([]);
-      setExecutionChangeHistoryLoading(false);
-      setExecutionChangeHistoryError(null);
-      setReviewError(null);
-      setReviewNotice(null);
-      setReviewFixDialogOpen(false);
-      setReviewFixSubmitting(false);
+    if (!open) {
+      latestReviewRequestIdRef.current += 1;
+      return;
     }
+
+    setAttachmentLoading(false);
+    setDeletingAttachmentId(null);
+    setLatestReview(null);
+    setLatestReviewLoading(false);
+    setExecutionChangeHistory([]);
+    setExecutionChangeHistoryLoading(false);
+    setExecutionChangeHistoryError(null);
+    setReviewError(null);
+    setReviewNotice(null);
+    setReviewFixDialogOpen(false);
+    setReviewFixSubmitting(false);
   }, [open, task.id]);
 
   useEffect(() => {
@@ -335,15 +341,25 @@ export function TaskDetailDialog({
   };
 
   const loadLatestReview = async () => {
+    const requestId = latestReviewRequestIdRef.current + 1;
+    latestReviewRequestIdRef.current = requestId;
     setLatestReviewLoading(true);
     try {
       const review = await getTaskLatestReview(task.id);
+      if (latestReviewRequestIdRef.current !== requestId) {
+        return;
+      }
       setLatestReview(review);
     } catch (error) {
+      if (latestReviewRequestIdRef.current !== requestId) {
+        return;
+      }
       console.error("Failed to load latest task review:", error);
       setReviewError(error instanceof Error ? error.message : String(error));
     } finally {
-      setLatestReviewLoading(false);
+      if (latestReviewRequestIdRef.current === requestId) {
+        setLatestReviewLoading(false);
+      }
     }
   };
 
@@ -400,6 +416,14 @@ export function TaskDetailDialog({
     }
   };
 
+  const handleRunCodex = async () => {
+    await executionActions.runTask();
+  };
+
+  const handleStopCodex = async () => {
+    await executionActions.stopTask();
+  };
+
   const buildReviewFixTaskDescription = (reviewReport: string) => {
     const sections = [
       "基于代码审核结果创建的修复任务。",
@@ -416,14 +440,6 @@ export function TaskDetailDialog({
     return sections.join("\n\n");
   };
 
-  const handleRunCodex = async () => {
-    await executionActions.runTask();
-  };
-
-  const handleStopCodex = async () => {
-    await executionActions.stopTask();
-  };
-
   const handleStartCodeReview = async () => {
     if (!reviewerId) {
       setReviewError("请先指定审查员，再执行代码审核。");
@@ -431,6 +447,7 @@ export function TaskDetailDialog({
     }
 
     setReviewError(null);
+    setReviewNotice(null);
     await reviewActions.startReview();
   };
 
@@ -489,7 +506,7 @@ export function TaskDetailDialog({
       });
 
       await updateEmployeeStatus(assigneeId, "busy");
-      await updateTaskStatus(createdTask.id, "in_progress");
+      await useTaskStore.getState().updateTaskStatus(createdTask.id, "in_progress");
       setCodexRunning(assigneeId, true, createdTask.id);
       clearCodexOutput(assigneeId);
       clearTaskCodexOutput(createdTask.id, "execution");
@@ -615,6 +632,11 @@ export function TaskDetailDialog({
                 onRefreshReview={() => void loadLatestReview()}
                 onCopyReview={() => void handleCopyReviewReport()}
                 onOpenReviewFix={() => setReviewFixDialogOpen(true)}
+                executionChangeHistory={executionChangeHistory}
+                executionChangeHistoryLoading={executionChangeHistoryLoading}
+                executionChangeHistoryError={executionChangeHistoryError}
+                onRefreshHistory={() => void loadExecutionChangeHistory()}
+                onOpenChangeDetail={(change) => void handleOpenExecutionChangeDetail(change)}
               />
             </TabsContent>
 

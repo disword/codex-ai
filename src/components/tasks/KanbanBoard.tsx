@@ -8,7 +8,7 @@ import {
   useSensors,
   closestCorners,
 } from "@dnd-kit/core";
-import { TASK_STATUSES, type Task, type TaskStatus } from "@/lib/types";
+import { TASK_STATUSES, type CodexSessionKind, type Task, type TaskStatus } from "@/lib/types";
 import { useTaskStore } from "@/stores/taskStore";
 import { useEmployeeStore } from "@/stores/employeeStore";
 import { KanbanColumn } from "./KanbanColumn";
@@ -23,7 +23,10 @@ export function KanbanBoard({ projectId: _projectId }: KanbanBoardProps) {
   const { tasks, moveTask, updateTaskStatus, fetchTasks } = useTaskStore();
   const employees = useEmployeeStore((s) => s.employees);
   const [activeTask, setActiveTask] = useState<Task | null>(null);
-  const [logTaskId, setLogTaskId] = useState<string | null>(null);
+  const [logRequest, setLogRequest] = useState<{
+    taskId: string;
+    sessionKind?: CodexSessionKind;
+  } | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor, {
@@ -84,7 +87,7 @@ export function KanbanBoard({ projectId: _projectId }: KanbanBoardProps) {
   const getTasksByStatus = (status: TaskStatus) =>
     tasks.filter((t) => t.status === status);
 
-  const logTask = logTaskId ? tasks.find((task) => task.id === logTaskId) ?? null : null;
+  const logTask = logRequest ? tasks.find((task) => task.id === logRequest.taskId) ?? null : null;
   const logAssigneeName = logTask?.assignee_id
     ? employees.find((employee) => employee.id === logTask.assignee_id)?.name
     : undefined;
@@ -106,7 +109,7 @@ export function KanbanBoard({ projectId: _projectId }: KanbanBoardProps) {
               label={status.label}
               color={status.color}
               tasks={getTasksByStatus(status.value)}
-              onOpenLog={setLogTaskId}
+              onOpenLog={(taskId, sessionKind) => setLogRequest({ taskId, sessionKind })}
             />
           ))}
         </div>
@@ -119,14 +122,15 @@ export function KanbanBoard({ projectId: _projectId }: KanbanBoardProps) {
         </DragOverlay>
       </DndContext>
 
-      {logTaskId !== null && (
+      {logRequest !== null && (
         <TaskLogDialog
-          open={logTaskId !== null}
+          open={logRequest !== null}
           task={logTask}
           assigneeName={logAssigneeName}
+          sessionKind={logRequest?.sessionKind}
           onOpenChange={(open) => {
             if (!open) {
-              setLogTaskId(null);
+              setLogRequest(null);
             }
           }}
         />

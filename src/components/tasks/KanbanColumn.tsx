@@ -3,7 +3,7 @@ import {
   SortableContext,
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
-import type { Task, TaskStatus } from "@/lib/types";
+import type { CodexSessionKind, Task, TaskStatus } from "@/lib/types";
 import { TaskCard } from "./TaskCard";
 
 interface KanbanColumnProps {
@@ -11,7 +11,7 @@ interface KanbanColumnProps {
   label: string;
   color: string;
   tasks: Task[];
-  onOpenLog: (taskId: string) => void;
+  onOpenLog: (taskId: string, sessionKind?: CodexSessionKind) => void;
 }
 
 export function KanbanColumn({
