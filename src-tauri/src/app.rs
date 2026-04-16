@@ -1468,6 +1468,31 @@ pub(crate) async fn validate_reviewer_for_project(
     Ok(())
 }
 
+async fn insert_task_record(
+    tx: &mut sqlx::Transaction<'_, Sqlite>,
+    task: &Task,
+) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO tasks (id, title, description, status, priority, project_id, assignee_id, reviewer_id, automation_mode, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+    )
+    .bind(&task.id)
+    .bind(&task.title)
+    .bind(&task.description)
+    .bind(&task.status)
+    .bind(&task.priority)
+    .bind(&task.project_id)
+    .bind(&task.assignee_id)
+    .bind(&task.reviewer_id)
+    .bind(&task.automation_mode)
+    .bind(&task.created_at)
+    .bind(&task.updated_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(|error| format!("Failed to create task: {}", error))?;
+
+    Ok(())
+}
+
 pub(crate) async fn fetch_task_automation_state_record(
     pool: &SqlitePool,
     task_id: &str,
@@ -3100,22 +3125,7 @@ pub async fn create_task<R: Runtime>(
         .await
         .map_err(|error| format!("Failed to start task transaction: {}", error))?;
 
-    sqlx::query(
-        "INSERT INTO tasks (id, title, description, status, priority, project_id, assignee_id, automation_mode, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
-    )
-    .bind(&task.id)
-    .bind(&task.title)
-    .bind(&task.description)
-    .bind(&task.status)
-    .bind(&task.priority)
-    .bind(&task.project_id)
-    .bind(&task.assignee_id)
-    .bind(&task.automation_mode)
-    .bind(&task.created_at)
-    .bind(&task.updated_at)
-    .execute(&mut *tx)
-    .await
-    .map_err(|error| format!("Failed to create task: {}", error))?;
+    insert_task_record(&mut tx, &task).await?;
 
     if task.automation_mode.is_some() {
         sqlx::query(
@@ -3571,9 +3581,10 @@ mod tests {
 
     use super::{
         build_current_migrator, ensure_statement_terminated,
-        fetch_execution_change_history_item_by_session_id, normalize_runtime_path_string,
-        resolve_session_resume_state, rewrite_file_change_diff_labels, sanitize_sql_backup_script,
-        validate_project_repo_path, validate_runtime_working_dir,
+        fetch_execution_change_history_item_by_session_id, fetch_task_by_id, insert_task_record,
+        normalize_runtime_path_string, resolve_session_resume_state,
+        rewrite_file_change_diff_labels, sanitize_sql_backup_script, validate_project_repo_path,
+        validate_runtime_working_dir, Task,
     };
 
     async fn setup_test_pool() -> SqlitePool {
@@ -3663,6 +3674,53 @@ mod tests {
         .execute(pool)
         .await
         .expect("insert file change");
+    }
+
+    async fn insert_project(pool: &SqlitePool, project_id: &str) {
+        sqlx::query(
+            r#"
+            INSERT INTO projects (
+                id,
+                name,
+                description,
+                status,
+                repo_path,
+                created_at,
+                updated_at
+            ) VALUES ($1, $2, NULL, 'active', NULL, '2026-04-16 10:00:00', '2026-04-16 10:00:00')
+            "#,
+        )
+        .bind(project_id)
+        .bind(format!("Project {project_id}"))
+        .execute(pool)
+        .await
+        .expect("insert project");
+    }
+
+    async fn insert_employee(pool: &SqlitePool, employee_id: &str, name: &str, role: &str) {
+        sqlx::query(
+            r#"
+            INSERT INTO employees (
+                id,
+                name,
+                role,
+                model,
+                reasoning_effort,
+                status,
+                specialization,
+                system_prompt,
+                project_id,
+                created_at,
+                updated_at
+            ) VALUES ($1, $2, $3, 'gpt-5.4', 'high', 'offline', NULL, NULL, NULL, '2026-04-16 10:00:00', '2026-04-16 10:00:00')
+            "#,
+        )
+        .bind(employee_id)
+        .bind(name)
+        .bind(role)
+        .execute(pool)
+        .await
+        .expect("insert employee");
     }
 
     #[test]
@@ -3869,6 +3927,51 @@ mod tests {
 
             assert!(item.changes.is_empty());
             assert_eq!(item.capture_mode, "sdk_event");
+
+            pool.close().await;
+        });
+    }
+
+    #[test]
+    fn insert_task_record_persists_reviewer_id() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build tokio runtime");
+
+        runtime.block_on(async {
+            let pool = setup_test_pool().await;
+            insert_project(&pool, "proj-1").await;
+            insert_employee(&pool, "reviewer-1", "Reviewer", "reviewer").await;
+
+            let task = Task {
+                id: "task-1".to_string(),
+                title: "测试任务".to_string(),
+                description: Some("验证审核员持久化".to_string()),
+                status: "todo".to_string(),
+                priority: "medium".to_string(),
+                project_id: "proj-1".to_string(),
+                assignee_id: None,
+                reviewer_id: Some("reviewer-1".to_string()),
+                complexity: None,
+                ai_suggestion: None,
+                automation_mode: None,
+                last_codex_session_id: None,
+                last_review_session_id: None,
+                created_at: "2026-04-16 10:00:00".to_string(),
+                updated_at: "2026-04-16 10:00:00".to_string(),
+            };
+
+            let mut tx = pool.begin().await.expect("begin task transaction");
+            insert_task_record(&mut tx, &task)
+                .await
+                .expect("insert task record");
+            tx.commit().await.expect("commit task transaction");
+
+            let saved_task = fetch_task_by_id(&pool, &task.id)
+                .await
+                .expect("fetch inserted task");
+            assert_eq!(saved_task.reviewer_id.as_deref(), Some("reviewer-1"));
 
             pool.close().await;
         });
