@@ -60,6 +60,7 @@ pub fn run() {
             app::start_task_code_review,
             app::set_task_automation_mode,
             app::get_task_automation_state,
+            task_automation::restart_task_automation,
             app::read_image_file,
             app::open_task_attachment,
             app::create_project,

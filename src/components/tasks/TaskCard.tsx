@@ -13,6 +13,7 @@ import {
   Loader2,
   MessageSquarePlus,
   Play,
+  RotateCcw,
   ScrollText,
   Square,
   Trash2,
@@ -40,6 +41,7 @@ export function TaskCard({ task, isOverlay, hideRunAction = false, onOpenLog }: 
   const [showDeleteDialog, setShowDeleteDialog] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [automationSubmitting, setAutomationSubmitting] = useState(false);
+  const [automationRestarting, setAutomationRestarting] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number } | null>(null);
   const projects = useProjectStore((s) => s.projects);
   const employees = useEmployeeStore((s) => s.employees);
@@ -50,6 +52,7 @@ export function TaskCard({ task, isOverlay, hideRunAction = false, onOpenLog }: 
   const fetchTaskAutomationState = useTaskStore((s) => s.fetchTaskAutomationState);
   const persistedAutomationState = useTaskStore((s) => s.automationStates[task.id]);
   const setTaskAutomationMode = useTaskStore((s) => s.setTaskAutomationMode);
+  const restartTaskAutomation = useTaskStore((s) => s.restartTaskAutomation);
   const deleteTask = useTaskStore((s) => s.deleteTask);
   const assignee = task.assignee_id ? employees.find((employee) => employee.id === task.assignee_id) : undefined;
   const reviewer = task.reviewer_id ? employees.find((employee) => employee.id === task.reviewer_id) : undefined;
@@ -90,10 +93,18 @@ export function TaskCard({ task, isOverlay, hideRunAction = false, onOpenLog }: 
   const isRunning = executionActions.isRunning;
   const isReviewRunning = reviewActions.isRunning;
   const isReviewTask = task.status === "review";
-  const isActionLoading = executionActions.loading !== null || reviewActions.loading || automationSubmitting;
+  const isActionLoading = executionActions.loading !== null || reviewActions.loading || automationSubmitting || automationRestarting;
   const shouldShowActionBar = !isOverlay && (isRunning || isReviewTask || !hideRunAction);
   const shouldShowPrimaryMenuAction = isRunning || isReviewTask || !hideRunAction;
   const hasPreLogActions = shouldShowPrimaryMenuAction || Boolean(task.last_codex_session_id);
+  const canRestartAutomation = automationState.enabled && [
+    "launching_review",
+    "waiting_review",
+    "launching_fix",
+    "waiting_execution",
+    "review_launch_failed",
+    "fix_launch_failed",
+  ].includes(automationState.status);
 
   const {
     attributes,
@@ -225,6 +236,26 @@ export function TaskCard({ task, isOverlay, hideRunAction = false, onOpenLog }: 
   const handleContinueConversation = async (prompt: string) => {
     if (!task.last_codex_session_id) return;
     await executionActions.continueTask(prompt);
+  };
+
+  const handleRestartAutomation = async () => {
+    if (!canRestartAutomation) return;
+    setContextMenu(null);
+    setAutomationRestarting(true);
+
+    try {
+      await restartTaskAutomation(task.id);
+      onOpenLog?.(
+        task.id,
+        automationState.status === "waiting_review" || automationState.status === "launching_review" || automationState.status === "review_launch_failed"
+          ? "review"
+          : "execution",
+      );
+    } catch (error) {
+      console.error("Failed to restart task automation:", error);
+    } finally {
+      setAutomationRestarting(false);
+    }
   };
 
   return (
@@ -449,6 +480,22 @@ export function TaskCard({ task, isOverlay, hideRunAction = false, onOpenLog }: 
               )}
               {automationState.enabled ? "关闭自动质控" : "开启自动质控"}
             </button>
+            {canRestartAutomation && (
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => void handleRestartAutomation()}
+                disabled={automationRestarting}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-left hover:bg-accent hover:text-accent-foreground disabled:pointer-events-none disabled:opacity-50"
+              >
+                {automationRestarting ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <RotateCcw className="h-4 w-4" />
+                )}
+                重启自动化
+              </button>
+            )}
             <div className="px-2 pb-1 text-[11px] text-muted-foreground">
               当前：{getTaskAutomationStatusLabel(automationState.status)}
             </div>

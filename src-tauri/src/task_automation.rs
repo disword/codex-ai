@@ -11,7 +11,9 @@ use crate::app::{
     fetch_task_by_id, insert_activity_log, now_sqlite, parse_review_verdict_json,
     record_completion_metric, sqlite_pool, start_task_code_review_internal,
 };
-use crate::codex::{load_codex_settings, start_codex_with_manager, CodexManager};
+use crate::codex::{
+    load_codex_settings, start_codex_with_manager, stop_codex_for_automation_restart, CodexManager,
+};
 use crate::db::models::{ReviewVerdict, Subtask, Task, TaskAttachment, TaskAutomationStateRecord};
 
 const AUTOMATION_MODE_REVIEW_FIX_LOOP_V1: &str = "review_fix_loop_v1";
@@ -30,6 +32,7 @@ const PHASE_BLOCKED: &str = "blocked";
 const PHASE_COMPLETED: &str = "completed";
 const PENDING_ACTION_START_REVIEW: &str = "start_review";
 const PENDING_ACTION_START_FIX: &str = "start_fix";
+const SESSION_EVENT_AUTOMATION_RESTART_REQUESTED: &str = "automation_restart_requested";
 
 #[derive(Clone, Debug)]
 struct SessionExitFacts {
@@ -40,7 +43,7 @@ struct SessionExitFacts {
     task_id: String,
     employee_id: Option<String>,
     has_stopping_requested: bool,
-    review_report: Option<String>,
+    has_restart_requested: bool,
     review_verdict: Option<ReviewVerdict>,
 }
 
@@ -242,6 +245,10 @@ async fn handle_execution_exit(
     state_record: Option<&TaskAutomationStateRecord>,
     facts: &SessionExitFacts,
 ) -> Result<(), String> {
+    if facts.has_restart_requested {
+        return Ok(());
+    }
+
     if facts.has_stopping_requested {
         upsert_state_terminal(
             pool,
@@ -307,25 +314,10 @@ async fn handle_execution_exit(
     )
     .await?;
 
-    update_task_status_internal(pool, task, "review").await?;
-    let before_sessions = fetch_task_session_ids(pool, &task.id, "review").await?;
-    let manager = app.state::<Arc<Mutex<CodexManager>>>().inner().clone();
-    start_task_code_review_internal(app.clone(), manager, &task.id)
-        .await
-        .map_err(|error| format!("Failed to start automation review: {}", error))?;
-    let new_session_id =
-        resolve_new_task_session_id(pool, &task.id, "review", &before_sessions).await?;
-
-    finalize_launched_action(
-        pool,
-        &task.id,
-        PHASE_WAITING_REVIEW,
-        Some(&new_session_id),
-        None,
-        next_round_count,
-        None,
-    )
-    .await?;
+    let reserved_state = fetch_task_automation_state_record(pool, &task.id)
+        .await?
+        .ok_or_else(|| "自动质控状态写入后丢失，无法发起审核".to_string())?;
+    retry_pending_review(app, pool, &task.id, &reserved_state).await?;
     insert_activity_log(
         pool,
         "task_automation_review_started",
@@ -345,6 +337,10 @@ async fn handle_review_exit(
     state_record: Option<&TaskAutomationStateRecord>,
     facts: &SessionExitFacts,
 ) -> Result<(), String> {
+    if facts.has_restart_requested {
+        return Ok(());
+    }
+
     if facts.has_stopping_requested {
         upsert_state_terminal(
             pool,
@@ -447,25 +443,10 @@ async fn handle_review_exit(
     )
     .await?;
 
-    let review_report = facts
-        .review_report
-        .as_deref()
-        .unwrap_or(verdict.summary.as_str());
-    let before_sessions = fetch_task_session_ids(pool, &task.id, "execution").await?;
-    start_automation_fix_round(app, pool, task, review_report, verdict).await?;
-    let new_session_id =
-        resolve_new_task_session_id(pool, &task.id, "execution", &before_sessions).await?;
-
-    finalize_launched_action(
-        pool,
-        &task.id,
-        PHASE_WAITING_EXECUTION,
-        Some(&new_session_id),
-        Some(next_round_count),
-        next_round_count,
-        Some(&verdict_json),
-    )
-    .await?;
+    let reserved_state = fetch_task_automation_state_record(pool, &task.id)
+        .await?
+        .ok_or_else(|| "自动质控状态写入后丢失，无法发起修复".to_string())?;
+    retry_pending_fix(app, pool, &task.id, &reserved_state).await?;
     insert_activity_log(
         pool,
         "task_automation_fix_started",
@@ -490,22 +471,32 @@ async fn retry_pending_review(
         return Ok(());
     }
 
-    update_task_status_internal(pool, &task, "review").await?;
-    let before_sessions = fetch_task_session_ids(pool, task_id, "review").await?;
-    let manager = app.state::<Arc<Mutex<CodexManager>>>().inner().clone();
-    start_task_code_review_internal(app.clone(), manager, task_id).await?;
-    let new_session_id =
-        resolve_new_task_session_id(pool, task_id, "review", &before_sessions).await?;
-    finalize_launched_action(
-        pool,
-        task_id,
-        PHASE_WAITING_REVIEW,
-        Some(&new_session_id),
-        None,
-        state_record.round_count,
-        state_record.last_verdict_json.as_deref(),
-    )
-    .await
+    let result = async {
+        update_task_status_internal(pool, &task, "review").await?;
+        let before_sessions = fetch_task_session_ids(pool, task_id, "review").await?;
+        let manager = app.state::<Arc<Mutex<CodexManager>>>().inner().clone();
+        start_task_code_review_internal(app.clone(), manager, task_id).await?;
+        let new_session_id =
+            resolve_new_task_session_id(pool, task_id, "review", &before_sessions).await?;
+        finalize_launched_action(
+            pool,
+            task_id,
+            PHASE_WAITING_REVIEW,
+            Some(&new_session_id),
+            None,
+            state_record.round_count,
+            state_record.last_verdict_json.as_deref(),
+        )
+        .await
+    }
+    .await;
+
+    if let Err(error) = result {
+        mark_launch_failure(pool, task_id, PHASE_REVIEW_LAUNCH_FAILED, &error).await?;
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 async fn retry_pending_fix(
@@ -518,29 +509,40 @@ async fn retry_pending_fix(
     if task.automation_mode.as_deref() != Some(AUTOMATION_MODE_REVIEW_FIX_LOOP_V1) {
         return Ok(());
     }
-    let Some(last_verdict_json) = state_record.last_verdict_json.as_deref() else {
-        return Ok(());
-    };
-    let verdict = parse_review_verdict_json(last_verdict_json)?;
-    let review_report = latest_review_report_for_task(pool, task_id)
-        .await?
-        .unwrap_or_else(|| verdict.summary.clone());
-    let before_sessions = fetch_task_session_ids(pool, task_id, "execution").await?;
-    start_automation_fix_round(app, pool, &task, &review_report, &verdict).await?;
-    let new_session_id =
-        resolve_new_task_session_id(pool, task_id, "execution", &before_sessions).await?;
-    finalize_launched_action(
-        pool,
-        task_id,
-        PHASE_WAITING_EXECUTION,
-        Some(&new_session_id),
-        state_record.pending_round_count,
-        state_record
-            .pending_round_count
-            .unwrap_or(state_record.round_count),
-        Some(last_verdict_json),
-    )
-    .await
+    let result = async {
+        let last_verdict_json = state_record
+            .last_verdict_json
+            .as_deref()
+            .ok_or_else(|| "自动修复缺少最近审核结论，无法继续执行".to_string())?;
+        let verdict = parse_review_verdict_json(last_verdict_json)?;
+        let review_report = latest_review_report_for_task(pool, task_id)
+            .await?
+            .unwrap_or_else(|| verdict.summary.clone());
+        let before_sessions = fetch_task_session_ids(pool, task_id, "execution").await?;
+        start_automation_fix_round(app, pool, &task, &review_report, &verdict).await?;
+        let new_session_id =
+            resolve_new_task_session_id(pool, task_id, "execution", &before_sessions).await?;
+        finalize_launched_action(
+            pool,
+            task_id,
+            PHASE_WAITING_EXECUTION,
+            Some(&new_session_id),
+            state_record.pending_round_count,
+            state_record
+                .pending_round_count
+                .unwrap_or(state_record.round_count),
+            Some(last_verdict_json),
+        )
+        .await
+    }
+    .await;
+
+    if let Err(error) = result {
+        mark_launch_failure(pool, task_id, PHASE_FIX_LAUNCH_FAILED, &error).await?;
+        return Err(error);
+    }
+
+    Ok(())
 }
 
 async fn start_automation_fix_round(
@@ -583,11 +585,37 @@ async fn start_automation_fix_round(
         assignee.system_prompt.clone(),
         Some(repo_path),
         Some(task.id.clone()),
-        task.last_codex_session_id.clone(),
+        None,
         Some(execution_input.image_paths),
         Some("execution".to_string()),
     )
     .await
+}
+
+async fn mark_launch_failure(
+    pool: &SqlitePool,
+    task_id: &str,
+    phase: &str,
+    message: &str,
+) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE task_automation_state
+        SET phase = $2,
+            last_error = $3,
+            updated_at = $4
+        WHERE task_id = $1
+        "#,
+    )
+    .bind(task_id)
+    .bind(phase)
+    .bind(message)
+    .bind(now_sqlite())
+    .execute(pool)
+    .await
+    .map_err(|error| format!("Failed to mark automation launch failure: {}", error))?;
+
+    Ok(())
 }
 
 async fn handle_disabled_mode_exit(
@@ -856,15 +884,15 @@ async fn fetch_session_exit_facts(
     .await
     .map_err(|error| format!("Failed to fetch stopping_requested event: {}", error))?
         > 0;
-
-    let review_report = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT message FROM codex_session_events WHERE session_id = $1 AND event_type = 'review_report' ORDER BY created_at DESC LIMIT 1",
+    let has_restart_requested = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM codex_session_events WHERE session_id = $1 AND event_type = $2",
     )
     .bind(&session_id)
-    .fetch_optional(pool)
+    .bind(SESSION_EVENT_AUTOMATION_RESTART_REQUESTED)
+    .fetch_one(pool)
     .await
-    .map_err(|error| format!("Failed to fetch review report: {}", error))?
-    .flatten();
+    .map_err(|error| format!("Failed to fetch automation restart event: {}", error))?
+        > 0;
 
     let review_verdict = sqlx::query_scalar::<_, Option<String>>(
         "SELECT message FROM codex_session_events WHERE session_id = $1 AND event_type = 'review_verdict' ORDER BY created_at DESC LIMIT 1",
@@ -888,9 +916,126 @@ async fn fetch_session_exit_facts(
         task_id,
         employee_id,
         has_stopping_requested,
-        review_report,
+        has_restart_requested,
         review_verdict,
     }))
+}
+
+async fn restart_review_step(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    task: &Task,
+    state_record: &TaskAutomationStateRecord,
+) -> Result<(), String> {
+    let reviewer_id = task
+        .reviewer_id
+        .as_deref()
+        .ok_or_else(|| "当前任务未指定审查员，无法重启自动审核".to_string())?;
+
+    reserve_pending_action(
+        pool,
+        &task.id,
+        state_record.last_trigger_session_id.as_deref(),
+        PHASE_LAUNCHING_REVIEW,
+        Some(PENDING_ACTION_START_REVIEW),
+        None,
+        state_record.round_count,
+        None,
+        state_record.last_verdict_json.as_deref(),
+    )
+    .await?;
+
+    let _ = stop_codex_for_automation_restart(app, reviewer_id, "自动质控正在重启审核步骤").await?;
+
+    let reserved_state = fetch_task_automation_state_record(pool, &task.id)
+        .await?
+        .ok_or_else(|| "自动质控状态不存在，无法重启审核步骤".to_string())?;
+    retry_pending_review(app, pool, &task.id, &reserved_state).await?;
+    insert_activity_log(
+        pool,
+        "task_automation_restart_requested",
+        "已重启自动质控审核步骤",
+        Some(reviewer_id),
+        Some(task.id.as_str()),
+        Some(task.project_id.as_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn restart_fix_step(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    task: &Task,
+    state_record: &TaskAutomationStateRecord,
+) -> Result<(), String> {
+    let assignee_id = task
+        .assignee_id
+        .as_deref()
+        .ok_or_else(|| "当前任务未指定开发负责人，无法重启自动修复".to_string())?;
+
+    reserve_pending_action(
+        pool,
+        &task.id,
+        state_record.last_trigger_session_id.as_deref(),
+        PHASE_LAUNCHING_FIX,
+        Some(PENDING_ACTION_START_FIX),
+        Some(state_record.round_count),
+        state_record.round_count,
+        None,
+        state_record.last_verdict_json.as_deref(),
+    )
+    .await?;
+
+    let _ = stop_codex_for_automation_restart(app, assignee_id, "自动质控正在重启修复步骤").await?;
+
+    let reserved_state = fetch_task_automation_state_record(pool, &task.id)
+        .await?
+        .ok_or_else(|| "自动质控状态不存在，无法重启修复步骤".to_string())?;
+    retry_pending_fix(app, pool, &task.id, &reserved_state).await?;
+    insert_activity_log(
+        pool,
+        "task_automation_restart_requested",
+        "已重启自动质控修复步骤",
+        Some(assignee_id),
+        Some(task.id.as_str()),
+        Some(task.project_id.as_str()),
+    )
+    .await?;
+    Ok(())
+}
+
+pub async fn restart_task_automation_internal(
+    app: &AppHandle,
+    task_id: &str,
+) -> Result<(), String> {
+    let pool = sqlite_pool(app).await?;
+    let task = fetch_task_by_id(&pool, task_id).await?;
+    if task.automation_mode.as_deref() != Some(AUTOMATION_MODE_REVIEW_FIX_LOOP_V1) {
+        return Err("当前任务未开启自动质控".to_string());
+    }
+
+    let state_record = fetch_task_automation_state_record(&pool, task_id)
+        .await?
+        .ok_or_else(|| "当前任务没有可重启的自动质控状态".to_string())?;
+
+    match state_record.phase.as_str() {
+        PHASE_WAITING_REVIEW | PHASE_LAUNCHING_REVIEW | PHASE_REVIEW_LAUNCH_FAILED => {
+            restart_review_step(app, &pool, &task, &state_record).await
+        }
+        PHASE_WAITING_EXECUTION | PHASE_LAUNCHING_FIX | PHASE_FIX_LAUNCH_FAILED => {
+            restart_fix_step(app, &pool, &task, &state_record).await
+        }
+        _ => Err(format!(
+            "当前自动质控阶段“{}”不支持重启，请在卡住或启动失败时使用",
+            state_record.phase
+        )),
+    }
+}
+
+#[tauri::command]
+pub async fn restart_task_automation(app: AppHandle, task_id: String) -> Result<(), String> {
+    restart_task_automation_internal(&app, &task_id).await
 }
 
 async fn fetch_task_session_ids(

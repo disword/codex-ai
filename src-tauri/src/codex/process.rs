@@ -1292,13 +1292,13 @@ async fn get_live_managed_process_with_manager(
     }
 }
 
-async fn wait_until_process_stops(
+async fn wait_until_process_stops_with_manager(
     app: &AppHandle,
-    state: &State<'_, Arc<Mutex<CodexManager>>>,
+    manager_state: &Arc<Mutex<CodexManager>>,
     employee_id: &str,
 ) -> Result<(), String> {
     for _ in 0..STOP_WAIT_MAX_ATTEMPTS {
-        if get_live_managed_process(app, state, employee_id)
+        if get_live_managed_process_with_manager(app, manager_state, employee_id)
             .await?
             .is_none()
         {
@@ -1308,7 +1308,7 @@ async fn wait_until_process_stops(
     }
 
     let process = {
-        let mut manager = state.lock().map_err(|error| error.to_string())?;
+        let mut manager = manager_state.lock().map_err(|error| error.to_string())?;
         manager.remove_process(employee_id)
     };
 
@@ -1326,6 +1326,59 @@ async fn wait_until_process_stops(
     }
 
     Ok(())
+}
+
+async fn stop_managed_process_with_manager(
+    app: &AppHandle,
+    manager_state: &Arc<Mutex<CodexManager>>,
+    employee_id: &str,
+    event_type: &str,
+    message: &str,
+) -> Result<bool, String> {
+    let running_process =
+        get_live_managed_process_with_manager(app, manager_state, employee_id).await?;
+
+    if let Some(process) = running_process {
+        let pool = sqlite_pool(app).await?;
+        update_codex_session_record(
+            app,
+            &process.session_record_id,
+            Some("stopping"),
+            None,
+            None,
+            None,
+        )
+        .await?;
+        insert_codex_session_event(&pool, &process.session_record_id, event_type, Some(message))
+            .await?;
+
+        let mut child = process.child.lock().await;
+        if let Err(error) = child.kill_process_group() {
+            eprintln!("[codex-stop] killpg failed, fallback to child.kill(): {error}");
+        }
+        child.kill().await?;
+        drop(child);
+        wait_until_process_stops_with_manager(app, manager_state, employee_id).await?;
+        return Ok(true);
+    }
+
+    Ok(false)
+}
+
+pub(crate) async fn stop_codex_for_automation_restart(
+    app: &AppHandle,
+    employee_id: &str,
+    message: &str,
+) -> Result<bool, String> {
+    let manager_state = app.state::<Arc<Mutex<CodexManager>>>().inner().clone();
+    stop_managed_process_with_manager(
+        app,
+        &manager_state,
+        employee_id,
+        "automation_restart_requested",
+        message,
+    )
+    .await
 }
 
 pub struct CodexChild {
@@ -2278,34 +2331,16 @@ pub async fn stop_codex(
     state: State<'_, Arc<Mutex<CodexManager>>>,
     employee_id: String,
 ) -> Result<(), String> {
-    let running_process = get_live_managed_process(&app, &state, &employee_id).await?;
-
-    if let Some(process) = running_process {
-        let pool = sqlite_pool(&app).await?;
-        update_codex_session_record(
-            &app,
-            &process.session_record_id,
-            Some("stopping"),
-            None,
-            None,
-            None,
-        )
-        .await?;
-        insert_codex_session_event(
-            &pool,
-            &process.session_record_id,
-            "stopping_requested",
-            Some("收到停止请求"),
-        )
-        .await?;
-
-        let mut child = process.child.lock().await;
-        if let Err(error) = child.kill_process_group() {
-            eprintln!("[codex-stop] killpg failed, fallback to child.kill(): {error}");
-        }
-        child.kill().await?;
-        drop(child);
-        wait_until_process_stops(&app, &state, &employee_id).await
+    if stop_managed_process_with_manager(
+        &app,
+        state.inner(),
+        &employee_id,
+        "stopping_requested",
+        "收到停止请求",
+    )
+    .await?
+    {
+        Ok(())
     } else {
         Err(format!(
             "No running codex instance for employee {}",
@@ -2330,35 +2365,14 @@ pub async fn restart_codex(
         .is_some();
 
     if is_running {
-        let running_process = get_live_managed_process(&app, &state, &employee_id).await?;
-
-        if let Some(process) = running_process {
-            let pool = sqlite_pool(&app).await?;
-            update_codex_session_record(
-                &app,
-                &process.session_record_id,
-                Some("stopping"),
-                None,
-                None,
-                None,
-            )
-            .await?;
-            insert_codex_session_event(
-                &pool,
-                &process.session_record_id,
-                "restart_requested",
-                Some("收到重启请求"),
-            )
-            .await?;
-
-            let mut child = process.child.lock().await;
-            if let Err(error) = child.kill_process_group() {
-                eprintln!("[codex-restart] killpg failed, fallback to child.kill(): {error}");
-            }
-            child.kill().await?;
-        }
-
-        wait_until_process_stops(&app, &state, &employee_id).await?;
+        stop_managed_process_with_manager(
+            &app,
+            state.inner(),
+            &employee_id,
+            "restart_requested",
+            "收到重启请求",
+        )
+        .await?;
     }
 
     start_codex(

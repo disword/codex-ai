@@ -171,6 +171,10 @@ export async function getTaskAutomationState(taskId: string): Promise<TaskAutoma
   return invoke("get_task_automation_state", { taskId });
 }
 
+export async function restartTaskAutomation(taskId: string): Promise<void> {
+  return invoke("restart_task_automation", { taskId });
+}
+
 export async function getCodexSettings(): Promise<CodexSettings> {
   return invoke("get_codex_settings");
 }

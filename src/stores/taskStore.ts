@@ -11,6 +11,7 @@ import {
   deleteTaskAttachment as deleteTaskAttachmentCommand,
   deleteTask as deleteTaskCommand,
   getTaskAutomationState as getTaskAutomationStateCommand,
+  restartTaskAutomation as restartTaskAutomationCommand,
   setTaskAutomationMode as setTaskAutomationModeCommand,
   updateSubtaskStatus as updateSubtaskStatusCommand,
   updateTask as updateTaskCommand,
@@ -50,6 +51,7 @@ interface TaskStore {
   updateTask: (id: string, updates: Partial<Pick<Task, "title" | "description" | "priority" | "status" | "assignee_id" | "reviewer_id" | "complexity" | "ai_suggestion" | "last_codex_session_id" | "last_review_session_id">>) => Promise<void>;
   setTaskAutomationMode: (taskId: string, automationMode: TaskAutomationMode | null) => Promise<void>;
   fetchTaskAutomationState: (taskId: string) => Promise<void>;
+  restartTaskAutomation: (taskId: string) => Promise<void>;
   deleteTask: (id: string) => Promise<void>;
   addTaskAttachments: (taskId: string, sourcePaths: string[]) => Promise<void>;
   deleteTaskAttachment: (taskId: string, attachmentId: string) => Promise<void>;
@@ -180,6 +182,12 @@ export const useTaskStore = create<TaskStore>((set, get) => ({
         [taskId]: state,
       },
     }));
+  },
+
+  restartTaskAutomation: async (taskId) => {
+    await restartTaskAutomationCommand(taskId);
+    await get().fetchTaskAutomationState(taskId);
+    await get().fetchTasks(get().activeProjectId);
   },
 
   setTaskLastSessionId: async (taskId, sessionId, sessionKind) => {
