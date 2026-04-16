@@ -548,7 +548,7 @@ export function TaskDetailDialog({
           </DialogHeader>
 
           <Tabs defaultValue="overview" className="gap-4">
-            <div className="overflow-x-auto">
+            <div className="overflow-x-auto overflow-y-hidden pb-[5px]">
               <TabsList variant="line" className="w-full min-w-max justify-start">
                 <TabsTrigger value="overview">概览</TabsTrigger>
                 <TabsTrigger value="execution">执行</TabsTrigger>
